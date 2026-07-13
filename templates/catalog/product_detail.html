@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}{{ product.title }} | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <div class="page-width section-space">
+    <nav class="breadcrumbs" aria-label="Breadcrumb">
+      <a href="{% url 'storefront:catalog' %}">Shop</a>
+      <span aria-hidden="true"> / </span>
+      <span aria-current="page">{{ product.category_name|default:"Item" }}</span>
+    </nav>
+
+    <article>
+      <div class="product-detail">
+        <div class="gallery{% if images|length < 2 %} gallery--single{% endif %}" data-gallery>
+          {% if images|length > 1 %}
+            <div class="gallery__thumbs" aria-label="Product images">
+              {% for image in images %}
+                <button class="gallery__thumb" type="button" data-gallery-thumb data-image-src="{{ image.url }}" data-image-alt="{{ product.title }}, image {{ forloop.counter }}" aria-label="Show image {{ forloop.counter }}" aria-current="{% if forloop.first %}true{% else %}false{% endif %}">
+                  <img src="{{ image.url }}" alt="" loading="lazy" decoding="async">
+                </button>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% with primary_image=images.first %}
+            <div class="gallery__stage">
+              {% if primary_image %}<img src="{{ primary_image.url }}" alt="{{ product.title }}, image 1" data-gallery-image>{% endif %}
+            </div>
+          {% endwith %}
+        </div>
+
+        <div class="product-info">
+          {% if product.condition %}<p class="eyebrow">{{ product.condition }}</p>{% endif %}
+          <h1>{{ product.title }}</h1>
+          <p class="product-info__price price"><span data-price-prefix>{% if variants %}From {% endif %}</span>$<span data-product-price>{{ product.price|floatformat:2 }}</span></p>
+          <p class="product-info__availability">
+            {% if product.available_quantity == 1 %}Only one available{% else %}{{ product.available_quantity }} available{% endif %}
+          </p>
+
+          {% if checkout_enabled %}
+            <form class="purchase-form" method="post" action="{% url 'storefront:cart_add' slug=product.slug %}">
+              {% csrf_token %}
+              {% if variants %}
+                <div class="field">
+                  <label for="product-variant">Option</label>
+                  <select id="product-variant" name="variant_id" data-variant-selector required>
+                    <option value="">Choose an option</option>
+                    {% for variant in variants %}
+                      <option value="{{ variant.id }}" data-price="{{ variant.price|floatformat:2 }}" data-quantity="{{ variant.quantity }}">{{ variant.title }} &mdash; ${{ variant.price|floatformat:2 }} ({{ variant.quantity }} available)</option>
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endif %}
+              <div class="quantity-row">
+                <div class="field">
+                  <label for="product-quantity">Quantity</label>
+                  <input id="product-quantity" type="number" name="quantity" value="1" min="1" max="{% if variants %}1{% else %}{{ product.available_quantity }}{% endif %}" inputmode="numeric" data-product-quantity required>
+                </div>
+                <button class="button button--accent" type="submit">Add to cart</button>
+              </div>
+              <p class="policy-note">Ships within the United States. All sales are final.</p>
+            </form>
+          {% else %}
+            <div class="paypal-message" role="status">Checkout is temporarily unavailable.</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="product-sections">
+        {% if product.description %}
+          <section class="product-section" aria-labelledby="description-heading">
+            <h2 id="description-heading">Description</h2>
+            <div class="product-description">{{ product.description|safe }}</div>
+          </section>
+        {% endif %}
+
+        {% if product.item_specifics %}
+          <section class="product-section" aria-labelledby="details-heading">
+            <h2 id="details-heading">Item details</h2>
+            <dl class="spec-list">
+              {% for name, value in product.item_specifics.items %}
+                <div class="spec-list__row">
+                  <dt>{{ name }}</dt>
+                  <dd>{{ value|join:", " }}</dd>
+                </div>
+              {% endfor %}
+            </dl>
+          </section>
+        {% endif %}
+
+        <section class="product-section" aria-labelledby="shipping-heading">
+          <h2 id="shipping-heading">Shipping</h2>
+          <div>
+            <p class="muted">United States shipping only. The final flat shipping amount is shown in your cart before checkout.</p>
+            <p class="muted">Tracking will appear on your private order status page after shipment.</p>
+          </div>
+        </section>
+      </div>
+    </article>
+  </div>
+{% endblock %}

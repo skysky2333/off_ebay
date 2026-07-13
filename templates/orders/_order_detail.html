@@ -1,0 +1,55 @@
+<div class="order-detail-layout">
+  <section aria-labelledby="items-heading">
+    <h2 id="items-heading">Items</h2>
+    <div class="line-items">
+      {% for item in order.items.all %}
+        <article class="line-item">
+          <div class="line-item__image">
+            {% if item.image_url %}<img src="{{ item.image_url }}" alt="{{ item.title }}" decoding="async">{% endif %}
+          </div>
+          <div class="line-item__content">
+            <h3>{{ item.title }}</h3>
+            {% if item.variation_title %}<p>{{ item.variation_title }}</p>{% endif %}
+            <p>Quantity {{ item.quantity }} &times; ${{ item.unit_price|floatformat:2 }}</p>
+          </div>
+          <p class="line-item__price price">${{ item.line_total|floatformat:2 }}</p>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <aside>
+    <dl class="order-facts">
+      <div class="order-fact">
+        <dt>Total</dt>
+        <dd>${{ order.total|floatformat:2 }} {{ order.currency }}</dd>
+      </div>
+      <div class="order-fact">
+        <dt>Shipping to</dt>
+        <dd>
+          <address>
+            {{ order.customer_name }}<br>
+            {{ order.shipping_line_1 }}<br>
+            {% if order.shipping_line_2 %}{{ order.shipping_line_2 }}<br>{% endif %}
+            {{ order.shipping_city }}, {{ order.shipping_region }} {{ order.shipping_postal_code }}
+          </address>
+        </dd>
+      </div>
+      {% if order.shipments.all %}
+        {% for shipment in order.shipments.all %}
+          <div class="order-fact">
+            <dt>{{ shipment.carrier }} tracking</dt>
+            <dd>
+              {% if shipment.tracking_url %}<a class="tracking-link" href="{{ shipment.tracking_url }}" rel="noreferrer">{{ shipment.tracking_number }}</a>{% else %}{{ shipment.tracking_number }}{% endif %}
+              <br><span class="muted">{{ shipment.get_status_display }}</span>
+            </dd>
+          </div>
+        {% endfor %}
+      {% endif %}
+      <div class="order-fact">
+        <dt>Order placed</dt>
+        <dd>{{ order.created_at|date:"F j, Y" }}</dd>
+      </div>
+    </dl>
+  </aside>
+</div>

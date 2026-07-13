@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+umask 077
+
+set -a
+. ./.env
+set +a
+
+mkdir -p backups
+destination=${1:-backups/seller-site-$(date +%Y%m%d-%H%M%S).dump}
+temporary=${destination}.tmp
+trap 'rm -f "$temporary"' EXIT
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc > "$temporary"
+docker compose exec -T db pg_restore --list < "$temporary" > /dev/null
+mv "$temporary" "$destination"
+trap - EXIT
+echo "$destination"

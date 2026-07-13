@@ -1,0 +1,11 @@
+.conda/
+.env
+.env.local
+.DS_Store
+__pycache__/
+*.py[cod]
+*.sqlite3
+.coverage
+htmlcov/
+staticfiles/
+backups/

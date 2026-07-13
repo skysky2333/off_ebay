@@ -1,0 +1,58 @@
+{% load static %}
+<!doctype html>
+<html class="no-js" lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#ffffff">
+  <script>document.documentElement.className = "js";</script>
+  <title>{% block title %}{{ store_name }}{% endblock %}</title>
+  <link rel="icon" href="{% static 'storefront/favicon.svg' %}" type="image/svg+xml">
+  <link rel="stylesheet" href="{% static 'storefront/store.css' %}">
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="site-header" data-site-header>
+    <div class="site-header__inner page-width">
+      <a class="wordmark" href="{% url 'storefront:catalog' %}" aria-label="{{ store_name }} home">{{ store_name }}</a>
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-navigation" data-menu-toggle>
+        <span class="menu-toggle__icon" aria-hidden="true"><span></span><span></span></span>
+        <span class="sr-only">Open menu</span>
+      </button>
+      <nav class="site-nav" id="site-navigation" aria-label="Primary navigation" data-site-nav>
+        <a href="{% url 'storefront:catalog' %}"{% if request.resolver_match.url_name == 'catalog' or request.resolver_match.url_name == 'product_detail' %} aria-current="page"{% endif %}>Shop</a>
+        <a class="cart-link" href="{% url 'storefront:cart' %}"{% if request.resolver_match.url_name == 'cart' %} aria-current="page"{% endif %}>
+          Cart
+          {% if cart_count %}<span class="cart-count" aria-label="{{ cart_count }} item{{ cart_count|pluralize }} in cart">{{ cart_count }}</span>{% endif %}
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  {% if messages %}
+    <div class="message-stack page-width" aria-live="polite">
+      {% for message in messages %}<p class="message{% if message.tags %} message--{{ message.tags }}{% endif %}">{{ message }}</p>{% endfor %}
+    </div>
+  {% endif %}
+
+  <main id="main-content" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-footer__inner page-width">
+      <p>&copy; {% now "Y" %} {{ store_name }}</p>
+      <div class="site-footer__links">
+        <span>Secure checkout by PayPal</span>
+        <a href="{% url 'storefront:privacy' %}">Privacy</a>
+        {% if support_email %}<a href="mailto:{{ support_email }}">Contact</a>{% endif %}
+      </div>
+    </div>
+  </footer>
+  <script src="{% static 'storefront/store.js' %}" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

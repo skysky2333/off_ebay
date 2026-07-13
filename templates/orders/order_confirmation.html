@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Order confirmed | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <div class="page-width">
+    <header class="order-header">
+      <div class="order-header__topline">
+        <p class="eyebrow">Payment received</p>
+        <span class="order-reference">Order {{ order.reference }}</span>
+      </div>
+      <h1>Thank you, {{ order.customer_name }}.</h1>
+      <p>Your order is confirmed. Keep this private page; it will show tracking when your order ships.</p>
+    </header>
+    {% include "orders/_order_detail.html" %}
+  </div>
+{% endblock %}

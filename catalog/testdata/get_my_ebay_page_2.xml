@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ActiveList>
+    <ItemArray><Item><ItemID>222</ItemID></Item></ItemArray>
+    <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+  </ActiveList>
+</GetMyeBaySellingResponse>

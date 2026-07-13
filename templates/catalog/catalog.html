@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Shop | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <section class="page-width" aria-labelledby="catalog-title">
+    <header class="catalog-header">
+      <div>
+        <p class="eyebrow">Current collection</p>
+        <h1 id="catalog-title">Available now</h1>
+      </div>
+      <p class="catalog-count">{{ products|length }} item{{ products|length|pluralize }}</p>
+    </header>
+  </section>
+
+  <section class="catalog-tools" aria-label="Catalog filters">
+    <form class="catalog-tools__form page-width" method="get" action="{% url 'storefront:catalog' %}">
+      <div class="field">
+        <label for="catalog-search">Search</label>
+        <input id="catalog-search" type="search" name="q" value="{{ query }}" placeholder="Search current items">
+      </div>
+      <div class="field">
+        <label for="catalog-category">Category</label>
+        <select id="catalog-category" name="category">
+          <option value="">All categories</option>
+          {% for category in categories %}
+            <option value="{{ category }}"{% if category == selected_category %} selected{% endif %}>{{ category }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="button button--secondary" type="submit">Apply filters</button>
+    </form>
+  </section>
+
+  <section class="page-width" aria-label="Products">
+    {% if products %}
+      <div class="product-grid">
+        {% for product in products %}
+          <article class="product-card">
+            <a class="product-card__image" href="{% url 'storefront:product_detail' slug=product.slug %}" aria-label="View {{ product.title }}">
+              {% with image=product.images.first %}
+                {% if image %}<img src="{{ image.url }}" alt="{{ product.title }}" loading="{% if forloop.counter > 8 %}lazy{% else %}eager{% endif %}" decoding="async">{% endif %}
+              {% endwith %}
+            </a>
+            <div class="product-card__body">
+              <div class="product-card__meta">
+                <span>{{ product.condition|default:"Condition not specified" }}</span>
+                {% if product.available_quantity == 1 %}<span>Only one available</span>{% endif %}
+              </div>
+              <h2><a href="{% url 'storefront:product_detail' slug=product.slug %}">{{ product.title }}</a></h2>
+              <p class="product-card__price price">${{ product.price|floatformat:2 }}</p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <div class="empty-state__inner">
+          <h2>No items found</h2>
+          {% if query or selected_category %}
+            <p>Try a different search or clear the current filters.</p>
+            <a class="button button--secondary" href="{% url 'storefront:catalog' %}">Clear filters</a>
+          {% else %}
+            <p>There are no items available right now. Please check back later.</p>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

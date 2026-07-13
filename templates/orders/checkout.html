@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Checkout | {{ store_name }}{% endblock %}
+
+{% block extra_head %}
+  {% if paypal_client_id %}<script src="https://www.paypal.com/sdk/js?client-id={{ paypal_client_id|urlencode }}&currency=USD&intent=capture&components=buttons" defer></script>{% endif %}
+{% endblock %}
+
+{% block content %}
+  <div class="page-width section-space">
+    <header class="page-heading">
+      <p class="eyebrow">Secure checkout</p>
+      <h1>Shipping and payment</h1>
+      <p>Enter a U.S. shipping address, then approve the verified total with PayPal.</p>
+    </header>
+
+    <div class="checkout-layout">
+      <div>
+        <form id="checkout-form" class="checkout-form" method="post" action="{% url 'storefront:paypal_create' %}">
+          {% csrf_token %}
+          {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+          <section class="form-section" aria-labelledby="contact-heading">
+            <h2 id="contact-heading">Contact</h2>
+            <div class="form-grid">
+              <div class="field field--wide">
+                <label for="{{ form.customer_email.id_for_label }}">Email</label>
+                {{ form.customer_email }}
+                {{ form.customer_email.errors }}
+                <p class="field__help">Used for order support and fulfillment questions.</p>
+              </div>
+              <div class="field field--wide">
+                <label for="{{ form.customer_phone.id_for_label }}">Phone <span class="muted">(optional)</span></label>
+                {{ form.customer_phone }}
+                {{ form.customer_phone.errors }}
+              </div>
+            </div>
+          </section>
+
+          <section class="form-section" aria-labelledby="address-heading">
+            <h2 id="address-heading">Shipping address</h2>
+            <div class="form-grid">
+              <div class="field field--wide">
+                <label for="{{ form.customer_name.id_for_label }}">Full name</label>
+                {{ form.customer_name }}
+                {{ form.customer_name.errors }}
+              </div>
+              <div class="field field--wide">
+                <label for="{{ form.shipping_line_1.id_for_label }}">Street address</label>
+                {{ form.shipping_line_1 }}
+                {{ form.shipping_line_1.errors }}
+              </div>
+              <div class="field field--wide">
+                <label for="{{ form.shipping_line_2.id_for_label }}">Apartment, suite, etc. <span class="muted">(optional)</span></label>
+                {{ form.shipping_line_2 }}
+                {{ form.shipping_line_2.errors }}
+              </div>
+              <div class="field">
+                <label for="{{ form.shipping_city.id_for_label }}">City</label>
+                {{ form.shipping_city }}
+                {{ form.shipping_city.errors }}
+              </div>
+              <div class="field">
+                <label for="{{ form.shipping_region.id_for_label }}">State</label>
+                {{ form.shipping_region }}
+                {{ form.shipping_region.errors }}
+              </div>
+              <div class="field">
+                <label for="{{ form.shipping_postal_code.id_for_label }}">ZIP code</label>
+                {{ form.shipping_postal_code }}
+                {{ form.shipping_postal_code.errors }}
+              </div>
+              <div class="field">
+                <span class="field-label">Country</span>
+                {{ form.shipping_country_code }}
+                <p class="fixed-field">United States</p>
+                {{ form.shipping_country_code.errors }}
+              </div>
+            </div>
+          </section>
+          <p class="privacy-note">Contact and shipping details are used to process and fulfill this order. <a href="{% url 'storefront:privacy' %}" target="_blank" rel="noreferrer">Privacy details</a></p>
+        </form>
+
+        <section class="paypal-region" aria-labelledby="payment-heading">
+          <div class="paypal-region__heading">
+            <h2 id="payment-heading">Payment</h2>
+            <p>PayPal securely handles your payment details.</p>
+          </div>
+          {% if paypal_client_id %}
+            <p class="paypal-message" data-paypal-loading>Loading PayPal...</p>
+            <div id="paypal-button-container" data-paypal-checkout data-form="#checkout-form" data-create-url="{% url 'storefront:paypal_create' %}" data-capture-url="{% url 'storefront:paypal_capture' %}"></div>
+            <p class="checkout-error" data-checkout-error role="alert" hidden></p>
+          {% else %}
+            <p class="paypal-message">PayPal checkout is not configured.</p>
+          {% endif %}
+        </section>
+      </div>
+
+      <aside class="order-summary" aria-labelledby="checkout-summary-heading">
+        <h2 id="checkout-summary-heading">Order summary</h2>
+        <dl class="line-items">
+          {% for item in items %}
+            <div class="summary-row">
+              <dt>{{ item.product.title }}{% if item.variant %}<br><span class="muted">{{ item.variant.title }}</span>{% endif %} &times; {{ item.quantity }}</dt>
+              <dd>${{ item.line_total|floatformat:2 }}</dd>
+            </div>
+          {% endfor %}
+        </dl>
+        <dl class="summary-rows">
+          <div class="summary-row"><dt>Subtotal</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
+          <div class="summary-row"><dt>Shipping</dt><dd>${{ shipping|floatformat:2 }}</dd></div>
+          <div class="summary-row summary-row--total"><dt>Total</dt><dd>${{ total|floatformat:2 }} USD</dd></div>
+        </dl>
+        <p class="summary-note">All sales are final.</p>
+      </aside>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,101 @@
+:root {
+  --primary: #17191b;
+  --secondary: #0a6655;
+  --accent: #ffffff;
+  --header-bg: #17191b;
+  --header-color: #ffffff;
+  --breadcrumbs-bg: #f2f3f3;
+  --breadcrumbs-fg: #3e4245;
+  --link-fg: #0a6655;
+  --link-hover-color: #074c40;
+  --button-bg: #17191b;
+  --button-hover-bg: #303438;
+  --default-button-bg: #0a6655;
+  --default-button-hover-bg: #074c40;
+  --body-fg: #25282a;
+  --body-bg: #f7f8f8;
+  --border-color: #dfe2e4;
+  --hairline-color: #e7e9ea;
+  --selected-bg: #e7f1ee;
+  --selected-row: #f2f7f5;
+}
+
+html,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: 0;
+}
+
+#header {
+  min-height: 60px;
+  padding-inline: 28px;
+}
+
+#branding {
+  display: flex;
+  align-items: center;
+}
+
+#site-name a {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+#site-name span {
+  margin-left: 8px;
+  color: #aeb4b7;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.store-link {
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.module,
+.inline-group,
+.submit-row,
+#changelist-filter {
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+div.breadcrumbs {
+  padding-inline: 28px;
+}
+
+#content {
+  padding: 28px;
+}
+
+input,
+textarea,
+select,
+.button,
+input[type="submit"] {
+  border-radius: 5px;
+}
+
+:focus-visible {
+  outline: 3px solid #70aa9f;
+  outline-offset: 2px;
+}
+
+@media (max-width: 767px) {
+  #header,
+  #content,
+  div.breadcrumbs {
+    padding-inline: 16px;
+  }
+
+  #site-name span {
+    display: none;
+  }
+}

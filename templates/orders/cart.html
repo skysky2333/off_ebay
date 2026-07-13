@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Cart | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <div class="page-width section-space">
+    <header class="page-heading">
+      <p class="eyebrow">Your order</p>
+      <h1>Cart</h1>
+    </header>
+
+    {% if items %}
+      <div class="cart-layout">
+        <section class="line-items" aria-label="Cart items">
+          {% for item in items %}
+            <article class="line-item">
+              <a class="line-item__image" href="{% url 'storefront:product_detail' slug=item.product.slug %}" aria-label="View {{ item.product.title }}">
+                {% with image=item.product.images.first %}
+                  {% if image %}<img src="{{ image.url }}" alt="{{ item.product.title }}" decoding="async">{% endif %}
+                {% endwith %}
+              </a>
+              <div class="line-item__content">
+                <h2><a href="{% url 'storefront:product_detail' slug=item.product.slug %}">{{ item.product.title }}</a></h2>
+                {% if item.variant %}<p class="line-item__variant">{{ item.variant.title }}</p>{% endif %}
+                <form class="line-item__actions" method="post" action="{% url 'storefront:cart_update' line_id=item.line_id %}">
+                  {% csrf_token %}
+                  <div>
+                    <label class="sr-only" for="quantity-{{ item.line_id }}">Quantity for {{ item.product.title }}</label>
+                    <div class="quantity-stepper" data-quantity-stepper>
+                      <button type="button" data-step="down" aria-label="Decrease quantity">&minus;</button>
+                      <input id="quantity-{{ item.line_id }}" type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.available_quantity }}" inputmode="numeric"{% if not item.available_quantity %} disabled{% endif %} required>
+                      <button type="button" data-step="up" aria-label="Increase quantity">+</button>
+                    </div>
+                  </div>
+                  <button class="button button--quiet" type="submit"{% if not item.available_quantity %} disabled{% endif %}>Update</button>
+                </form>
+                <form method="post" action="{% url 'storefront:cart_remove' line_id=item.line_id %}">
+                  {% csrf_token %}
+                  <button class="button button--quiet" type="submit">Remove</button>
+                </form>
+              </div>
+              <p class="line-item__price price">${{ item.line_total|floatformat:2 }}</p>
+            </article>
+          {% endfor %}
+        </section>
+
+        <aside class="order-summary" aria-labelledby="summary-heading">
+          <h2 id="summary-heading">Order summary</h2>
+          <dl class="summary-rows">
+            <div class="summary-row"><dt>Items</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
+            <div class="summary-row"><dt>Shipping</dt><dd>${{ shipping|floatformat:2 }}</dd></div>
+            <div class="summary-row summary-row--total"><dt>Total</dt><dd>${{ total|floatformat:2 }} USD</dd></div>
+          </dl>
+          {% if checkout_enabled and cart_valid %}
+            <a class="button button--accent" href="{% url 'storefront:checkout' %}">Continue to checkout</a>
+            <p class="summary-note">Inventory is verified before payment.</p>
+          {% elif checkout_enabled %}
+            <p class="paypal-message">Remove or update unavailable items before checkout.</p>
+          {% else %}
+            <p class="paypal-message">Checkout is temporarily unavailable.</p>
+          {% endif %}
+        </aside>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <div class="empty-state__inner">
+          <h2>Your cart is empty</h2>
+          <p>Browse the current collection to find an item.</p>
+          <a class="button" href="{% url 'storefront:catalog' %}">Continue shopping</a>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+{% endblock %}

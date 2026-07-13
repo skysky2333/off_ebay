@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<GetItemResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <Item>
+    <ItemID>123456789012</ItemID>
+    <Title>Precision Tool Set</Title>
+    <Description><![CDATA[<p>Clean <strong>example</strong>.</p><script>alert(1)</script>]]></Description>
+    <StartPrice currencyID="USD">19.00</StartPrice>
+    <Quantity>5</Quantity>
+    <SellingStatus><QuantitySold>1</QuantitySold></SellingStatus>
+    <ConditionDisplayName>New</ConditionDisplayName>
+    <PrimaryCategory>
+      <CategoryID>123</CategoryID>
+      <CategoryName>Tools</CategoryName>
+    </PrimaryCategory>
+    <ItemSpecifics>
+      <NameValueList><Name>Brand</Name><Value>FM2K</Value></NameValueList>
+      <NameValueList><Name>Material</Name><Value>Steel</Value><Value>Rubber</Value></NameValueList>
+    </ItemSpecifics>
+    <ShippingDetails>
+      <ShippingType>Flat</ShippingType>
+      <ShippingServiceOptions>
+        <ShippingService>USPSGroundAdvantage</ShippingService>
+        <ShippingServiceCost currencyID="USD">4.50</ShippingServiceCost>
+        <ShippingServiceAdditionalCost currencyID="USD">1.00</ShippingServiceAdditionalCost>
+        <FreeShipping>false</FreeShipping>
+      </ShippingServiceOptions>
+      <ExcludeShipToLocation>PO Box</ExcludeShipToLocation>
+    </ShippingDetails>
+    <ShipToLocations>US</ShipToLocations>
+    <DispatchTimeMax>2</DispatchTimeMax>
+    <Location>Baltimore, Maryland</Location>
+    <Country>US</Country>
+    <PostalCode>21201</PostalCode>
+    <ListingType>FixedPriceItem</ListingType>
+    <ListingDetails>
+      <ViewItemURL>https://www.ebay.com/itm/123456789012</ViewItemURL>
+      <StartTime>2026-07-01T12:00:00.000Z</StartTime>
+      <EndTime>2026-08-01T12:00:00.000Z</EndTime>
+    </ListingDetails>
+    <PictureDetails>
+      <GalleryURL>https://i.ebayimg.com/images/g/gallery.jpg</GalleryURL>
+      <PictureURL>https://i.ebayimg.com/images/g/one.jpg</PictureURL>
+      <PictureURL>https://i.ebayimg.com/images/g/two.jpg</PictureURL>
+    </PictureDetails>
+    <Variations>
+      <Variation>
+        <SKU>RED-01</SKU>
+        <StartPrice currencyID="USD">19.00</StartPrice>
+        <Quantity>3</Quantity>
+        <SellingStatus><QuantitySold>1</QuantitySold></SellingStatus>
+        <VariationSpecifics>
+          <NameValueList><Name>Color</Name><Value>Red</Value></NameValueList>
+        </VariationSpecifics>
+      </Variation>
+      <Variation>
+        <StartPrice currencyID="USD">17.00</StartPrice>
+        <Quantity>2</Quantity>
+        <SellingStatus><QuantitySold>0</QuantitySold></SellingStatus>
+        <VariationSpecifics>
+          <NameValueList><Name>Color</Name><Value>Blue</Value></NameValueList>
+        </VariationSpecifics>
+      </Variation>
+      <Pictures>
+        <VariationSpecificName>Color</VariationSpecificName>
+        <VariationSpecificPictureSet>
+          <VariationSpecificValue>Red</VariationSpecificValue>
+          <PictureURL>https://i.ebayimg.com/images/g/red.jpg</PictureURL>
+        </VariationSpecificPictureSet>
+      </Pictures>
+    </Variations>
+  </Item>
+</GetItemResponse>

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Access denied | {{ store_name }}{% endblock %}
+{% block content %}
+  <section class="error-page">
+    <div class="error-page__inner">
+      <p class="error-page__code">403</p>
+      <h1>This page isn't available.</h1>
+      <p>You don't have permission to view this page.</p>
+      <a class="button" href="{% url 'storefront:catalog' %}">Return to shop</a>
+    </div>
+  </section>
+{% endblock %}

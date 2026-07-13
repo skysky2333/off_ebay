@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Order {{ order.reference }} | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <div class="page-width">
+    <header class="order-header">
+      <div class="order-header__topline">
+        <span class="status-chip status-chip--{{ order.status }}">{{ order.get_status_display }}</span>
+        <span class="order-reference">Order {{ order.reference }}</span>
+      </div>
+      {% if order.status == "shipped" %}
+        <h1>Your order is on its way.</h1>
+        <p>Shipment details and tracking are listed below.</p>
+      {% elif order.status == "paid" or order.status == "fulfilling" %}
+        <h1>Your order is being prepared.</h1>
+        <p>Payment is complete. Tracking will appear here after shipment.</p>
+      {% elif order.status == "payment_processing" or order.status == "capture_pending" %}
+        <h1>Your payment is being confirmed.</h1>
+        <p>Keep this page. The latest verified status will appear here.</p>
+      {% elif order.status == "awaiting_payment" %}
+        <h1>Payment is pending.</h1>
+        <p>This order has not been paid. Inventory is held only until {{ order.expires_at|date:"F j, Y \a\t g:i A" }}.</p>
+      {% elif order.status == "refunded" or order.status == "partially_refunded" %}
+        <h1>Your refund was processed.</h1>
+        <p>PayPal will return the refunded amount to the original payment method.</p>
+      {% elif order.status == "cancelled" or order.status == "expired" %}
+        <h1>This order is closed.</h1>
+        <p>The order is no longer active and no payment will be captured.</p>
+      {% else %}
+        <h1>Order status</h1>
+        <p>The latest order information is shown below.</p>
+      {% endif %}
+    </header>
+    {% include "orders/_order_detail.html" %}
+  </div>
+{% endblock %}

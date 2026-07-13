@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Request not accepted | {{ store_name }}{% endblock %}
+{% block content %}
+  <section class="error-page">
+    <div class="error-page__inner">
+      <p class="error-page__code">400</p>
+      <h1>We couldn't process that request.</h1>
+      <p>Please return to the shop and try again.</p>
+      <a class="button" href="{% url 'storefront:catalog' %}">Return to shop</a>
+    </div>
+  </section>
+{% endblock %}

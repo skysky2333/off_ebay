@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Store unavailable | {{ store_name }}{% endblock %}
+{% block content %}
+  <section class="error-page">
+    <div class="error-page__inner">
+      <p class="error-page__code">500</p>
+      <h1>The store is temporarily unavailable.</h1>
+      <p>Please wait a moment, then try again.</p>
+      <a class="button" href="{% url 'storefront:catalog' %}">Try again</a>
+    </div>
+  </section>
+{% endblock %}

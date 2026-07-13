@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Page not found | {{ store_name }}{% endblock %}
+{% block content %}
+  <section class="error-page">
+    <div class="error-page__inner">
+      <p class="error-page__code">404</p>
+      <h1>We couldn't find that page.</h1>
+      <p>The item may have sold or the link may no longer be active.</p>
+      <a class="button" href="{% url 'storefront:catalog' %}">Browse available items</a>
+    </div>
+  </section>
+{% endblock %}

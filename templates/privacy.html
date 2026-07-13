@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Privacy | {{ store_name }}{% endblock %}
+
+{% block content %}
+  <div class="narrow-width section-space">
+    <header class="page-heading">
+      <p class="eyebrow">Privacy</p>
+      <h1>Order information</h1>
+    </header>
+    <div class="product-sections">
+      <section class="product-section">
+        <h2>Information used</h2>
+        <p>Your name, contact details, shipping address, order contents, and shipment status are retained to process the order, provide support, and maintain transaction records. Payment credentials are handled by PayPal and are not stored here.</p>
+      </section>
+      <section class="product-section">
+        <h2>Fulfillment</h2>
+        <p>Order and address details are shared with PayPal and the connected shipping service as needed for payment and delivery. Order status pages use a private, unguessable link.</p>
+      </section>
+      {% if support_email %}
+        <section class="product-section">
+          <h2>Questions</h2>
+          <p>Contact <a href="mailto:{{ support_email }}">{{ support_email }}</a> about your order information.</p>
+        </section>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
