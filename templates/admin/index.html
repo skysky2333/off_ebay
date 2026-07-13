@@ -1,0 +1,19 @@
+{% extends "admin/base_site.html" %}
+{% load static storefront_admin %}
+
+{% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'admin/css/dashboard.css' %}">{% endblock %}
+{% block coltype %}colM{% endblock %}
+{% block bodyclass %}{{ block.super }} dashboard{% endblock %}
+{% block nav-breadcrumbs %}{% endblock %}
+{% block nav-sidebar %}{% endblock %}
+{% block content_title %}{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% operations_dashboard %}
+  <div class="operations-management">
+    <h2>Management</h2>
+    {% include "admin/management_app_list.html" with app_list=app_list %}
+  </div>
+</div>
+{% endblock %}

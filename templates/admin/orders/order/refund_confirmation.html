@@ -1,0 +1,31 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls i18n l10n static %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/js/cancel.js' %}" async></script>
+{% endblock %}
+
+{% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }} refund-confirmation{% endblock %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% translate "Home" %}</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url opts|admin_urlname:'changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; Confirm refund
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>Refund <strong>{{ order.currency }} {{ refund_amount|floatformat:2 }}</strong> for order <strong>{{ order.reference }}</strong> through PayPal?</p>
+  <p>This refunds the full remaining balance for {{ order.customer_name }}. This action cannot be undone.</p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ order.pk|unlocalize }}">
+    <input type="hidden" name="action" value="refund_one_order">
+    <input type="hidden" name="confirm_refund" value="yes">
+    <input class="default" type="submit" value="Refund {{ order.currency }} {{ refund_amount|floatformat:2 }}">
+    <a class="button cancel-link" href="{% url opts|admin_urlname:'changelist' %}">Cancel</a>
+  </form>
+{% endblock %}

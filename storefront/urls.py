@@ -22,6 +22,11 @@ urlpatterns = [
     path("orders/<uuid:token>/confirmed/", views.order_confirmation, name="order_confirmation"),
     path("orders/<uuid:token>/", views.order_status, name="order_status"),
     path("webhooks/paypal/", views.paypal_webhook, name="paypal_webhook"),
+    path(
+        "webhooks/ebay/account-deletion/",
+        views.ebay_account_deletion,
+        name="ebay_account_deletion",
+    ),
     path("health/", views.health, name="health"),
     path("privacy/", views.privacy, name="privacy"),
     path("robots.txt", views.robots, name="robots"),

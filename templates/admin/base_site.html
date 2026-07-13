@@ -6,7 +6,17 @@
 {% block extrastyle %}{{ block.super }}<link rel="stylesheet" href="{% static 'storefront/admin.css' %}">{% endblock %}
 
 {% block branding %}
-  <div id="site-name"><a href="{% url 'admin:index' %}">{{ store_name|default:"FM2K" }} <span>Operations</span></a></div>
+  <div id="site-name"><a href="{% url 'admin:index' %}">{{ store_name|default:"Off-Ebay" }} <span>Operations</span></a></div>
 {% endblock %}
 
-{% block nav-global %}<a class="store-link" href="{% url 'storefront:catalog' %}">View store</a>{% endblock %}
+{% block userlinks %}
+  <a href="{% url 'storefront:catalog' %}">View store</a> /
+  {% if user.has_usable_password %}<a href="{% url 'admin:password_change' %}">{% translate 'Change password' %}</a> /{% endif %}
+  <form id="logout-form" method="post" action="{% url 'admin:logout' %}">
+    {% csrf_token %}
+    <button type="submit">{% translate 'Log out' %}</button>
+  </form>
+  {% include "admin/color_theme_toggle.html" %}
+{% endblock %}
+
+{% block nav-global %}{% endblock %}

@@ -6,10 +6,31 @@
   <div class="page-width">
     <header class="order-header">
       <div class="order-header__topline">
-        <span class="status-chip status-chip--{{ order.status }}">{{ order.get_status_display }}</span>
+        <div class="order-header__statuses">
+          {% if is_delivered %}
+            <span class="status-chip status-chip--delivered">Delivered</span>
+          {% elif has_delivered %}
+            <span class="status-chip status-chip--fulfilling">Shipment delivered</span>
+          {% elif has_shipped %}
+            <span class="status-chip status-chip--shipped">In transit</span>
+          {% else %}
+            <span class="status-chip status-chip--{{ order.status }}">{{ order.get_status_display }}</span>
+          {% endif %}
+          {% if has_shipped and order.status == "partially_refunded" %}
+            <span class="status-chip status-chip--partially_refunded">Partially refunded</span>
+          {% elif has_shipped and order.status == "refunded" %}
+            <span class="status-chip status-chip--refunded">Refunded</span>
+          {% endif %}
+        </div>
         <span class="order-reference">Order {{ order.reference }}</span>
       </div>
-      {% if order.status == "shipped" %}
+      {% if is_delivered %}
+        <h1>Your order was delivered.</h1>
+        <p>Delivery details and tracking are listed below.</p>
+      {% elif has_delivered %}
+        <h1>A shipment was delivered.</h1>
+        <p>Delivery details are below. Additional shipment updates may follow.</p>
+      {% elif has_shipped %}
         <h1>Your order is on its way.</h1>
         <p>Shipment details and tracking are listed below.</p>
       {% elif order.status == "paid" or order.status == "fulfilling" %}
@@ -17,12 +38,20 @@
         <p>Payment is complete. Tracking will appear here after shipment.</p>
       {% elif order.status == "payment_processing" or order.status == "capture_pending" %}
         <h1>Your payment is being confirmed.</h1>
-        <p>Keep this page. The latest verified status will appear here.</p>
+        <p role="status">Payment confirmation is still in progress. Check again in a moment.</p>
+        <a class="button button--quiet" href="{% url 'storefront:order_status' token=order.status_token %}">Check status</a>
+      {% elif order.status == "funding_retry" %}
+        <h1>Choose another payment method.</h1>
+        <p>PayPal could not use the selected funding source. Your items remain reserved until {{ order.expires_at|date:"F j, Y \a\t g:i A" }}.</p>
+        {% if can_resume_payment %}<a class="button" href="{% url 'storefront:checkout' %}">Return to checkout</a>{% endif %}
       {% elif order.status == "awaiting_payment" %}
         <h1>Payment is pending.</h1>
         <p>This order has not been paid. Inventory is held only until {{ order.expires_at|date:"F j, Y \a\t g:i A" }}.</p>
-      {% elif order.status == "refunded" or order.status == "partially_refunded" %}
-        <h1>Your refund was processed.</h1>
+      {% elif order.status == "partially_refunded" %}
+        <h1>Your partial refund was processed.</h1>
+        <p>PayPal will return the refunded amount to the original payment method.</p>
+      {% elif order.status == "refunded" %}
+        <h1>Your order was refunded.</h1>
         <p>PayPal will return the refunded amount to the original payment method.</p>
       {% elif order.status == "cancelled" or order.status == "expired" %}
         <h1>This order is closed.</h1>
@@ -30,6 +59,11 @@
       {% else %}
         <h1>Order status</h1>
         <p>The latest order information is shown below.</p>
+      {% endif %}
+      {% if has_shipped and order.status == "partially_refunded" %}
+        <p class="order-refund-note">Your partial refund was processed. PayPal will return it to the original payment method.</p>
+      {% elif has_shipped and order.status == "refunded" %}
+        <p class="order-refund-note">Your refund was processed. PayPal will return it to the original payment method.</p>
       {% endif %}
     </header>
     {% include "orders/_order_detail.html" %}

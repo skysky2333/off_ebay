@@ -8,17 +8,71 @@
 
 {% block content %}
   <div class="page-width section-space">
+    <nav class="breadcrumbs" aria-label="Breadcrumb">
+      {% if fixed_order %}
+        <a href="{% url 'storefront:order_status' token=fixed_order.status_token %}">Order status</a>
+      {% else %}
+        <a href="{% url 'storefront:cart' %}">Cart</a>
+      {% endif %}
+      <span aria-hidden="true"> / </span>
+      <span aria-current="page">Checkout</span>
+    </nav>
     <header class="page-heading">
       <p class="eyebrow">Secure checkout</p>
-      <h1>Shipping and payment</h1>
-      <p>Enter a U.S. shipping address, then approve the verified total with PayPal.</p>
+      <h1>{% if fixed_order %}Complete payment{% else %}Shipping and payment{% endif %}</h1>
+      <p>{% if fixed_order %}Choose another PayPal funding source for the confirmed order.{% else %}Enter a U.S. shipping address, then approve the verified total with PayPal.{% endif %}</p>
     </header>
 
     <div class="checkout-layout">
-      <div>
+      <aside class="order-summary" aria-labelledby="checkout-summary-heading">
+        <h2 id="checkout-summary-heading">Order summary</h2>
+        <p class="checkout-summary__count">{{ item_count }} item{{ item_count|pluralize }}</p>
+        <dl class="line-items checkout-summary__items">
+          {% for item in items %}
+            <div class="summary-row">
+              <dt>{{ item.product.title }}{% if item.variant %}<br><span class="muted">{{ item.variant.title }}</span>{% endif %} &times; {{ item.quantity }}</dt>
+              <dd>${{ item.line_total|floatformat:2 }}</dd>
+            </div>
+          {% endfor %}
+        </dl>
+        <dl class="summary-rows">
+          <div class="summary-row"><dt>Direct subtotal</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
+          <div class="summary-row"><dt>Shipping</dt><dd>${{ shipping|floatformat:2 }}</dd></div>
+          <div class="summary-row"><dt>Tax</dt><dd>$0.00</dd></div>
+          <div class="summary-row summary-row--total"><dt>Total</dt><dd>${{ total|floatformat:2 }} USD</dd></div>
+        </dl>
+        <p class="summary-note">All sales are final.</p>
+      </aside>
+
+      <div class="checkout-main">
         <form id="checkout-form" class="checkout-form" method="post" action="{% url 'storefront:paypal_create' %}">
           {% csrf_token %}
+          <input type="hidden" name="quote_fingerprint" value="{{ quote_fingerprint }}">
           {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+          {% if fixed_order %}
+            <section class="form-section" aria-labelledby="fixed-details-heading">
+              <h2 id="fixed-details-heading">Contact and shipping</h2>
+              <p class="checkout-fixed-note">These details are fixed for this PayPal checkout.</p>
+              <dl class="order-facts checkout-fixed-details">
+                <div class="order-fact">
+                  <dt>Contact</dt>
+                  <dd>{{ fixed_order.customer_email }}{% if fixed_order.customer_phone %}<br>{{ fixed_order.customer_phone }}{% endif %}</dd>
+                </div>
+                <div class="order-fact">
+                  <dt>Shipping to</dt>
+                  <dd>
+                    <address>
+                      {{ fixed_order.customer_name }}<br>
+                      {{ fixed_order.shipping_line_1 }}<br>
+                      {% if fixed_order.shipping_line_2 %}{{ fixed_order.shipping_line_2 }}<br>{% endif %}
+                      {{ fixed_order.shipping_city }}, {{ fixed_order.shipping_region }} {{ fixed_order.shipping_postal_code }}<br>
+                      United States
+                    </address>
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          {% else %}
           <section class="form-section" aria-labelledby="contact-heading">
             <h2 id="contact-heading">Contact</h2>
             <div class="form-grid">
@@ -26,7 +80,7 @@
                 <label for="{{ form.customer_email.id_for_label }}">Email</label>
                 {{ form.customer_email }}
                 {{ form.customer_email.errors }}
-                <p class="field__help">Used for order support and fulfillment questions.</p>
+                <p class="field__help" id="customer-email-help">Used for order support and fulfillment questions.</p>
               </div>
               <div class="field field--wide">
                 <label for="{{ form.customer_phone.id_for_label }}">Phone <span class="muted">(optional)</span></label>
@@ -77,7 +131,8 @@
               </div>
             </div>
           </section>
-          <p class="privacy-note">Contact and shipping details are used to process and fulfill this order. <a href="{% url 'storefront:privacy' %}" target="_blank" rel="noreferrer">Privacy details</a></p>
+          <p class="privacy-note">Contact and shipping details are used to process and fulfill this order. <a href="{% url 'storefront:privacy' %}">Privacy details</a></p>
+          {% endif %}
         </form>
 
         <section class="paypal-region" aria-labelledby="payment-heading">
@@ -86,7 +141,8 @@
             <p>PayPal securely handles your payment details.</p>
           </div>
           {% if paypal_client_id %}
-            <p class="paypal-message" data-paypal-loading>Loading PayPal...</p>
+            <p class="paypal-message js-only" data-paypal-loading role="status" aria-live="polite" aria-atomic="true">Loading PayPal...</p>
+            <noscript><p class="paypal-message" role="status">JavaScript is required to use PayPal checkout. Enable JavaScript, then refresh this page.</p></noscript>
             <div id="paypal-button-container" data-paypal-checkout data-form="#checkout-form" data-create-url="{% url 'storefront:paypal_create' %}" data-capture-url="{% url 'storefront:paypal_capture' %}"></div>
             <p class="checkout-error" data-checkout-error role="alert" hidden></p>
           {% else %}
@@ -94,24 +150,6 @@
           {% endif %}
         </section>
       </div>
-
-      <aside class="order-summary" aria-labelledby="checkout-summary-heading">
-        <h2 id="checkout-summary-heading">Order summary</h2>
-        <dl class="line-items">
-          {% for item in items %}
-            <div class="summary-row">
-              <dt>{{ item.product.title }}{% if item.variant %}<br><span class="muted">{{ item.variant.title }}</span>{% endif %} &times; {{ item.quantity }}</dt>
-              <dd>${{ item.line_total|floatformat:2 }}</dd>
-            </div>
-          {% endfor %}
-        </dl>
-        <dl class="summary-rows">
-          <div class="summary-row"><dt>Subtotal</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
-          <div class="summary-row"><dt>Shipping</dt><dd>${{ shipping|floatformat:2 }}</dd></div>
-          <div class="summary-row summary-row--total"><dt>Total</dt><dd>${{ total|floatformat:2 }} USD</dd></div>
-        </dl>
-        <p class="summary-note">All sales are final.</p>
-      </aside>
     </div>
   </div>
 {% endblock %}

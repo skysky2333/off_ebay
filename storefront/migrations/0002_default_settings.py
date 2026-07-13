@@ -4,8 +4,12 @@ from django.db import migrations
 
 
 def create_settings(apps, schema_editor):
-    apps.get_model("storefront", "StoreSettings").objects.create(
-        pk=1, flat_shipping_amount=Decimal("0.00"), checkout_enabled=False
+    apps.get_model("storefront", "StoreSettings").objects.get_or_create(
+        pk=1,
+        defaults={
+            "flat_shipping_amount": Decimal("0.00"),
+            "checkout_enabled": False,
+        },
     )
 
 

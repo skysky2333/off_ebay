@@ -1,16 +1,15 @@
 #!/bin/sh
 set -eu
 
+repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repository"
 test "$#" -eq 1
 test -f "$1"
-set -a
-. ./.env
-set +a
 
 docker compose up -d --wait db
 docker compose exec -T db pg_restore --list < "$1" > /dev/null
 docker compose stop web worker
-docker compose exec -T db dropdb -U "$POSTGRES_USER" --force "$POSTGRES_DB"
-docker compose exec -T db createdb -U "$POSTGRES_USER" "$POSTGRES_DB"
-docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner < "$1"
-docker compose up -d --build web worker
+docker compose exec -T db sh -c 'exec dropdb -U "$POSTGRES_USER" --force "$POSTGRES_DB"'
+docker compose exec -T db sh -c 'exec createdb -U "$POSTGRES_USER" "$POSTGRES_DB"'
+docker compose exec -T db sh -c 'exec pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner' < "$1"
+docker compose up -d --build --wait web worker

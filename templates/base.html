@@ -7,7 +7,9 @@
   <meta name="robots" content="noindex,nofollow,noarchive">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#ffffff">
-  <script>document.documentElement.className = "js";</script>
+  <script>
+    document.documentElement.className = "js";
+  </script>
   <title>{% block title %}{{ store_name }}{% endblock %}</title>
   <link rel="icon" href="{% static 'storefront/favicon.svg' %}" type="image/svg+xml">
   <link rel="stylesheet" href="{% static 'storefront/store.css' %}">
@@ -18,11 +20,7 @@
   <header class="site-header" data-site-header>
     <div class="site-header__inner page-width">
       <a class="wordmark" href="{% url 'storefront:catalog' %}" aria-label="{{ store_name }} home">{{ store_name }}</a>
-      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-navigation" data-menu-toggle>
-        <span class="menu-toggle__icon" aria-hidden="true"><span></span><span></span></span>
-        <span class="sr-only">Open menu</span>
-      </button>
-      <nav class="site-nav" id="site-navigation" aria-label="Primary navigation" data-site-nav>
+      <nav class="site-nav" aria-label="Primary navigation">
         <a href="{% url 'storefront:catalog' %}"{% if request.resolver_match.url_name == 'catalog' or request.resolver_match.url_name == 'product_detail' %} aria-current="page"{% endif %}>Shop</a>
         <a class="cart-link" href="{% url 'storefront:cart' %}"{% if request.resolver_match.url_name == 'cart' %} aria-current="page"{% endif %}>
           Cart
@@ -31,6 +29,10 @@
       </nav>
     </div>
   </header>
+
+  <div class="direct-offer">
+    <p class="page-width"><strong>Buy directly here for {{ direct_discount_percent|floatformat:"-2" }}% off the eBay price, with no tax.</strong> Inventory stays synchronized with eBay.</p>
+  </div>
 
   {% if messages %}
     <div class="message-stack page-width" aria-live="polite">

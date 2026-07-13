@@ -28,7 +28,10 @@
           {% endfor %}
         </select>
       </div>
-      <button class="button button--secondary" type="submit">Apply filters</button>
+      <div class="catalog-tools__actions">
+        <button class="button button--secondary" type="submit">Apply</button>
+        {% if query or selected_category %}<a class="filter-reset" href="{% url 'storefront:catalog' %}">Clear</a>{% endif %}
+      </div>
     </form>
   </section>
 
@@ -38,8 +41,9 @@
         {% for product in products %}
           <article class="product-card">
             <a class="product-card__image" href="{% url 'storefront:product_detail' slug=product.slug %}" aria-label="View {{ product.title }}">
+              <span class="image-placeholder" aria-hidden="true">Image unavailable</span>
               {% with image=product.images.first %}
-                {% if image %}<img src="{{ image.url }}" alt="{{ product.title }}" loading="{% if forloop.counter > 8 %}lazy{% else %}eager{% endif %}" decoding="async">{% endif %}
+                {% if image %}<img src="{{ image.url }}" alt="" loading="{% if forloop.counter > 4 %}lazy{% else %}eager{% endif %}" decoding="async" onerror="this.hidden=true">{% endif %}
               {% endwith %}
             </a>
             <div class="product-card__body">
@@ -48,7 +52,11 @@
                 {% if product.available_quantity == 1 %}<span>Only one available</span>{% endif %}
               </div>
               <h2><a href="{% url 'storefront:product_detail' slug=product.slug %}">{{ product.title }}</a></h2>
-              <p class="product-card__price price">${{ product.price|floatformat:2 }}</p>
+              <div class="price-comparison product-card__prices">
+                <p class="product-card__price price"><span class="price-label">Direct</span> ${{ product.display_direct_price|floatformat:2 }}</p>
+                <p class="ebay-price"><span class="price-label">eBay</span> <s>${{ product.display_price|floatformat:2 }}</s></p>
+              </div>
+              <a class="ebay-link" href="{{ product.listing_url }}">View on eBay</a>
             </div>
           </article>
         {% endfor %}

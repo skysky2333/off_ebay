@@ -3,11 +3,14 @@ import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from catalog.ebay import EbayInventoryConflict
 from catalog.models import InventoryOperation, Product, ProductVariant
@@ -21,7 +24,7 @@ from .models import (
     Refund,
     Shipment,
 )
-from .paypal import PayPalClient
+from .paypal import PayPalClient, PayPalInstrumentDeclined
 
 
 class OrderStateError(ValueError):
@@ -29,6 +32,10 @@ class OrderStateError(ValueError):
 
 
 class PayPalOrderInactive(OrderStateError):
+    pass
+
+
+class OrderReservationExpired(OrderStateError):
     pass
 
 
@@ -42,6 +49,108 @@ class PaymentDataError(ValueError):
 
 class WebhookVerificationError(ValueError):
     pass
+
+
+SHIPPABLE_ORDER_STATUSES = frozenset(
+    {
+        Order.Status.PAID,
+        Order.Status.FULFILLING,
+        Order.Status.SHIPPED,
+        Order.Status.PARTIALLY_REFUNDED,
+    }
+)
+PENDING_SHIPMENT_STATUSES = frozenset(
+    {Shipment.Status.LABEL_CREATED, Shipment.Status.ON_HOLD}
+)
+FINAL_SHIPMENT_STATUSES = frozenset(
+    {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}
+)
+TERMINAL_PAYPAL_SHIPMENT_STATUSES = frozenset(
+    {Shipment.Status.CANCELLED, Shipment.Status.DELIVERED}
+)
+PAYPAL_REFUND_STATUSES = {
+    "PENDING": Refund.Status.PENDING,
+    "COMPLETED": Refund.Status.COMPLETED,
+    "FAILED": Refund.Status.FAILED,
+    "CANCELLED": Refund.Status.CANCELLED,
+}
+REFUND_REVIEW_STATUSES = frozenset(
+    {Refund.Status.PENDING, Refund.Status.FAILED, Refund.Status.CANCELLED}
+)
+
+
+def refunds_needing_review(queryset=None):
+    queryset = Refund.objects.all() if queryset is None else queryset
+    return queryset.filter(
+        status__in=REFUND_REVIEW_STATUSES,
+        order__refunded_total__lt=F("order__total"),
+    )
+
+
+def orders_accepting_shipments(queryset=None):
+    queryset = Order.objects.all() if queryset is None else queryset
+    return queryset.filter(status__in=SHIPPABLE_ORDER_STATUSES).exclude(
+        refunds__status=Refund.Status.PENDING
+    )
+
+
+def orders_needing_fulfillment(queryset=None):
+    queryset = orders_accepting_shipments(queryset)
+    completed = Shipment.objects.filter(
+        order_id=OuterRef("pk"),
+        completes_order=True,
+        status__in=FINAL_SHIPMENT_STATUSES,
+    )
+    return (
+        queryset.annotate(fulfillment_complete=Exists(completed))
+        .filter(
+            Q(status__in={Order.Status.PAID, Order.Status.FULFILLING})
+            | Q(
+                status=Order.Status.PARTIALLY_REFUNDED,
+                fulfillment_complete=False,
+            )
+            | Q(
+                status__in={
+                    Order.Status.SHIPPED,
+                    Order.Status.PARTIALLY_REFUNDED,
+                },
+                shipments__status__in=PENDING_SHIPMENT_STATUSES,
+            )
+        )
+        .distinct()
+    )
+
+
+def orders_needing_paypal_tracking(queryset=None):
+    queryset = Order.objects.all() if queryset is None else queryset
+    paypal_shipments = Shipment.objects.filter(
+        order_id=OuterRef("pk"), source=Shipment.Source.PAYPAL
+    )
+    active_paypal_shipments = paypal_shipments.exclude(
+        status__in=TERMINAL_PAYPAL_SHIPMENT_STATUSES
+    )
+    return (
+        queryset.filter(
+            paid_at__isnull=False,
+            paypal_order_id__isnull=False,
+            paypal_capture_id__isnull=False,
+        )
+        .annotate(
+            has_paypal_shipment=Exists(paypal_shipments),
+            has_active_paypal_shipment=Exists(active_paypal_shipments),
+        )
+        .filter(
+            Q(has_active_paypal_shipment=True)
+            | Q(
+                has_paypal_shipment=False,
+                status__in={
+                    Order.Status.PAID,
+                    Order.Status.FULFILLING,
+                    Order.Status.PARTIALLY_REFUNDED,
+                },
+            )
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -67,12 +176,33 @@ def _money(value):
     return format(value, ".2f")
 
 
-def _checkout_fingerprint(email, address, currency, shipping_total, lines):
+def _paypal_object(value, name):
+    if not isinstance(value, dict):
+        raise PaymentDataError(f"PayPal {name} is invalid.")
+    return value
+
+
+def _paypal_list(value, name):
+    if not isinstance(value, list):
+        raise PaymentDataError(f"PayPal {name} is invalid.")
+    return value
+
+
+def _paypal_text(value, name):
+    if not isinstance(value, str) or not value:
+        raise PaymentDataError(f"PayPal {name} is invalid.")
+    return value
+
+
+def _checkout_fingerprint(
+    email, address, currency, shipping_total, expected_total, lines
+):
     payload = {
         "email": email,
         "address": asdict(address),
         "currency": currency,
         "shipping_total": _money(shipping_total),
+        "expected_total": _money(expected_total),
         "lines": [
             {
                 **asdict(line),
@@ -110,6 +240,7 @@ def create_guest_order(
     address: ShippingAddress,
     lines: list[CheckoutLine],
     shipping_total: Decimal,
+    expected_total: Decimal,
     inventory: InventoryGateway,
 ):
     if not lines:
@@ -126,7 +257,9 @@ def create_guest_order(
     _validate_us_destination(address.country_code, address.region)
 
     currency = "USD"
-    fingerprint = _checkout_fingerprint(email, address, currency, shipping_total, lines)
+    fingerprint = _checkout_fingerprint(
+        email, address, currency, shipping_total, expected_total, lines
+    )
     existing = Order.objects.select_for_update().filter(checkout_key=checkout_key).first()
     if existing:
         if existing.checkout_fingerprint != fingerprint:
@@ -162,11 +295,11 @@ def create_guest_order(
                 or not variant.sku
             ):
                 raise InventoryUnavailable("A selected product option is unavailable.")
-            price = variant.price
+            price = variant.direct_price
         else:
             if active_variants:
                 raise InventoryUnavailable("A product option is required.")
-            price = product.price
+            price = product.direct_price
         currencies.add(product.currency)
         image = product.images.first()
         snapshots.append((line, product, variant, price, image.url if image else ""))
@@ -177,6 +310,11 @@ def create_guest_order(
         (price * line.quantity for line, _, _, price, _ in snapshots),
         start=Decimal("0.00"),
     )
+    total = subtotal + shipping_total
+    if total != expected_total:
+        raise InventoryUnavailable(
+            "The order total changed. Refresh checkout and review the updated total."
+        )
     expires_at = timezone.now() + timedelta(minutes=settings.ORDER_RESERVATION_MINUTES)
     order = Order(
         checkout_key=checkout_key,
@@ -193,11 +331,20 @@ def create_guest_order(
         currency=currency.upper(),
         subtotal=subtotal,
         shipping_total=shipping_total,
-        total=subtotal + shipping_total,
+        total=total,
         expires_at=expires_at,
     )
     order.full_clean(validate_unique=False)
-    order.save()
+    try:
+        with transaction.atomic():
+            order.save()
+    except IntegrityError:
+        existing = Order.objects.filter(checkout_key=checkout_key).first()
+        if existing is None:
+            raise
+        if existing.checkout_fingerprint != fingerprint:
+            raise IdempotencyConflict("Checkout key was already used for another order.")
+        return existing
 
     for line, product, variant, price, image_url in snapshots:
         item = OrderItem(
@@ -302,29 +449,36 @@ def create_paypal_checkout(order_id, return_url, cancel_url, client: PayPalClien
     if order.status != Order.Status.AWAITING_PAYMENT:
         raise OrderStateError("Only awaiting-payment orders can start PayPal checkout.")
     if order.paypal_order_id:
-        response = client.get_order(order.paypal_order_id)
-        if response["id"] != order.paypal_order_id:
+        response = _paypal_object(client.get_order(order.paypal_order_id), "order")
+        paypal_order_id = _paypal_text(response.get("id"), "order ID")
+        paypal_status = _paypal_text(response.get("status"), "order status")
+        if paypal_order_id != order.paypal_order_id:
             raise PaymentDataError("PayPal order identity does not match the order.")
-        order.paypal_status = response["status"]
+        order.paypal_status = paypal_status
         order.save(update_fields=("paypal_status", "updated_at"))
-        if response["status"] == "VOIDED":
+        if paypal_status == "VOIDED":
             raise PayPalOrderInactive("The previous PayPal checkout has ended.")
         return order
     if order.expires_at <= timezone.now():
-        raise OrderStateError("The inventory reservation has expired.")
+        raise OrderReservationExpired("The inventory reservation has expired.")
     _validate_us_destination(order.shipping_country_code, order.shipping_region)
 
-    response = client.create_order(
-        _paypal_payload(order, return_url, cancel_url),
-        request_id=f"create-{order.reference}",
+    response = _paypal_object(
+        client.create_order(
+            _paypal_payload(order, return_url, cancel_url),
+            request_id=f"create-{order.reference}",
+        ),
+        "order",
     )
-    if not response["id"] or response["status"] not in {
+    paypal_order_id = _paypal_text(response.get("id"), "order ID")
+    paypal_status = _paypal_text(response.get("status"), "order status")
+    if paypal_status not in {
         "CREATED",
         "PAYER_ACTION_REQUIRED",
     }:
         raise PaymentDataError("PayPal did not create a payable order.")
-    order.paypal_order_id = response["id"]
-    order.paypal_status = response["status"]
+    order.paypal_order_id = paypal_order_id
+    order.paypal_status = paypal_status
     order.save(update_fields=("paypal_order_id", "paypal_status", "updated_at"))
     _event(
         order,
@@ -336,64 +490,115 @@ def create_paypal_checkout(order_id, return_url, cancel_url, client: PayPalClien
     return order
 
 
+def _paypal_amount(amount):
+    if not isinstance(amount, dict):
+        raise PaymentDataError("PayPal amount is invalid.")
+    currency = amount.get("currency_code")
+    value = amount.get("value")
+    if not isinstance(currency, str) or not isinstance(value, str):
+        raise PaymentDataError("PayPal amount is invalid.")
+    try:
+        parsed_value = Decimal(value)
+    except InvalidOperation as error:
+        raise PaymentDataError("PayPal amount is invalid.") from error
+    if not parsed_value.is_finite():
+        raise PaymentDataError("PayPal amount is invalid.")
+    return currency, parsed_value
+
+
 def _validate_amount(order, amount):
-    if amount["currency_code"] != order.currency:
+    currency, parsed_value = _paypal_amount(amount)
+    if currency != order.currency:
         raise PaymentDataError("PayPal currency does not match the order.")
-    if Decimal(amount["value"]) != order.total:
+    if parsed_value != order.total:
         raise PaymentDataError("PayPal amount does not match the order.")
 
 
 def _validate_paypal_order(order, response):
-    if response["id"] != order.paypal_order_id or response["intent"] != "CAPTURE":
+    response = _paypal_object(response, "order")
+    paypal_order_id = _paypal_text(response.get("id"), "order ID")
+    intent = _paypal_text(response.get("intent"), "order intent")
+    paypal_status = _paypal_text(response.get("status"), "order status")
+    if paypal_order_id != order.paypal_order_id or intent != "CAPTURE":
         raise PaymentDataError("PayPal order identity does not match the order.")
-    if response["status"] not in {"APPROVED", "COMPLETED"}:
+    if paypal_status not in {"APPROVED", "COMPLETED"}:
         raise PaymentDataError("PayPal has not approved this order.")
-    purchase_units = response["purchase_units"]
+    purchase_units = _paypal_list(response.get("purchase_units"), "purchase units")
     if len(purchase_units) != 1:
         raise PaymentDataError("PayPal order must contain one purchase unit.")
-    purchase = purchase_units[0]
+    purchase = _paypal_object(purchase_units[0], "purchase unit")
     for field in ("reference_id", "custom_id", "invoice_id"):
-        if purchase[field] != order.reference:
+        if _paypal_text(purchase.get(field), "order reference") != order.reference:
             raise PaymentDataError("PayPal reference does not match the order.")
-    _validate_amount(order, purchase["amount"])
-    address = purchase["shipping"]["address"]
+    _validate_amount(order, purchase.get("amount"))
+    shipping = _paypal_object(purchase.get("shipping"), "shipping data")
+    name = _paypal_object(shipping.get("name"), "shipping name")
+    full_name = _paypal_text(name.get("full_name"), "shipping name")
+    if full_name.strip() != order.customer_name.strip():
+        raise PaymentDataError("PayPal shipping name does not match the order.")
+    address = _paypal_object(shipping.get("address"), "shipping address")
     expected = {
         "address_line_1": order.shipping_line_1,
+        "address_line_2": order.shipping_line_2,
         "admin_area_2": order.shipping_city,
         "admin_area_1": order.shipping_region,
         "postal_code": order.shipping_postal_code,
         "country_code": order.shipping_country_code,
     }
-    if order.shipping_line_2:
-        expected["address_line_2"] = order.shipping_line_2
-    if any(address.get(key, "").strip() != value.strip() for key, value in expected.items()):
-        raise PaymentDataError("PayPal shipping address does not match the order.")
+    for key, value in expected.items():
+        actual = address.get(key, "")
+        if not isinstance(actual, str) or actual.strip() != value.strip():
+            raise PaymentDataError("PayPal shipping address does not match the order.")
     _validate_us_destination(address["country_code"], address["admin_area_1"])
     return purchase
 
 
-def _completed_capture(order, response):
-    if response["id"] != order.paypal_order_id or response["status"] != "COMPLETED":
+def _capture_from_order(order, response):
+    response = _paypal_object(response, "captured order")
+    paypal_order_id = _paypal_text(response.get("id"), "order ID")
+    paypal_status = _paypal_text(response.get("status"), "order status")
+    if paypal_order_id != order.paypal_order_id or paypal_status != "COMPLETED":
         raise PaymentDataError("PayPal order capture is not complete.")
-    captures = response["purchase_units"][0]["payments"]["captures"]
-    if len(captures) != 1 or captures[0]["status"] != "COMPLETED":
-        raise PaymentDataError("PayPal did not return one completed capture.")
-    capture = captures[0]
-    _validate_amount(order, capture["amount"])
+    purchase_units = _paypal_list(response.get("purchase_units"), "purchase units")
+    if len(purchase_units) != 1:
+        raise PaymentDataError("PayPal order must contain one purchase unit.")
+    purchase = _paypal_object(purchase_units[0], "purchase unit")
+    payments = _paypal_object(purchase.get("payments"), "payment data")
+    captures = _paypal_list(payments.get("captures"), "captures")
+    if len(captures) != 1:
+        raise PaymentDataError("PayPal did not return one capture.")
+    capture = _paypal_object(captures[0], "capture")
+    _paypal_text(capture.get("id"), "capture ID")
+    capture_status = _paypal_text(capture.get("status"), "capture status")
+    if capture_status not in {
+        "COMPLETED",
+        "DECLINED",
+        "PARTIALLY_REFUNDED",
+        "PENDING",
+        "REFUNDED",
+        "FAILED",
+    }:
+        raise PaymentDataError("PayPal returned an unsupported capture status.")
+    _validate_amount(order, capture.get("amount"))
     return capture
 
 
 @transaction.atomic
 def _begin_payment_processing(order_id, paypal_status):
     order = Order.objects.select_for_update().get(pk=order_id)
-    if order.status == Order.Status.AWAITING_PAYMENT:
+    update_fields = ["paypal_status"]
+    if order.status in {
+        Order.Status.AWAITING_PAYMENT,
+        Order.Status.FUNDING_RETRY,
+    }:
         if order.expires_at <= timezone.now():
-            raise OrderStateError("The inventory reservation has expired.")
+            raise OrderReservationExpired("The inventory reservation has expired.")
         order.status = Order.Status.PAYMENT_PROCESSING
+        update_fields.extend(("status", "updated_at"))
     elif order.status != Order.Status.PAYMENT_PROCESSING:
         raise OrderStateError("This order cannot be captured.")
     order.paypal_status = paypal_status
-    order.save(update_fields=("status", "paypal_status", "updated_at"))
+    order.save(update_fields=update_fields)
 
 
 def _commit_reservations(order_id, inventory):
@@ -462,6 +667,30 @@ def _mark_capture_pending(order_id):
 
 
 @transaction.atomic
+def _mark_funding_retry(order_id):
+    order = Order.objects.select_for_update().get(pk=order_id)
+    if order.status == Order.Status.FUNDING_RETRY:
+        return order
+    if order.status != Order.Status.CAPTURE_PENDING:
+        raise OrderStateError("This order cannot request another payment method.")
+    order.status = Order.Status.FUNDING_RETRY
+    order.paypal_status = "INSTRUMENT_DECLINED"
+    order.expires_at = timezone.now() + timedelta(
+        minutes=settings.ORDER_RESERVATION_MINUTES
+    )
+    order.save(
+        update_fields=("status", "paypal_status", "expires_at", "updated_at")
+    )
+    _event(
+        order,
+        "payment.funding_source_declined",
+        OrderEvent.Source.PAYPAL,
+        {"paypal_order_id": order.paypal_order_id},
+    )
+    return order
+
+
+@transaction.atomic
 def _mark_paid(order_id, capture):
     order = Order.objects.select_for_update().get(pk=order_id)
     if order.paid_at:
@@ -472,19 +701,23 @@ def _mark_paid(order_id, capture):
         status=InventoryReservation.Status.COMMITTED
     ).exists():
         raise PaymentDataError("Captured payment requires committed inventory.")
-    order.status = Order.Status.PAID
+    if capture["status"] == "PARTIALLY_REFUNDED" and order.refunded_total <= 0:
+        raise PaymentDataError("PayPal refund details have not been received.")
+    if capture["status"] == "REFUNDED" and order.refunded_total != order.total:
+        raise PaymentDataError("PayPal refund details have not been received.")
     order.paypal_capture_id = capture["id"]
     order.paypal_status = capture["status"]
-    order.paid_at = timezone.now()
+    now = timezone.now()
+    order.paid_at = now
     order.save(
         update_fields=(
-            "status",
             "paypal_capture_id",
             "paypal_status",
             "paid_at",
             "updated_at",
         )
     )
+    _refresh_fulfillment_status(order, now)
     _event(
         order,
         "payment.captured",
@@ -492,6 +725,43 @@ def _mark_paid(order_id, capture):
         {"capture_id": capture["id"], "amount": capture["amount"]},
         f"paypal-capture:{capture['id']}:completed",
     )
+    return order
+
+
+@transaction.atomic
+def _record_incomplete_capture(order_id, capture):
+    order = Order.objects.select_for_update().get(pk=order_id)
+    if order.paid_at:
+        if order.paypal_capture_id != capture["id"]:
+            raise PaymentDataError("Order already has a different PayPal capture.")
+        return order
+    if capture["status"] == "PENDING" and InventoryReservation.objects.filter(
+        order_item__order=order
+    ).exclude(status=InventoryReservation.Status.COMMITTED).exists():
+        raise PaymentDataError("Pending payment requires committed inventory.")
+    if order.paypal_capture_id and order.paypal_capture_id != capture["id"]:
+        raise PaymentDataError("Order already has a different PayPal capture.")
+    order.paypal_capture_id = capture["id"]
+    order.paypal_status = capture["status"]
+    order.save(update_fields=("paypal_capture_id", "paypal_status"))
+    event_key = f"paypal-capture:{capture['id']}:{capture['status'].lower()}"
+    if not OrderEvent.objects.filter(event_key=event_key).exists():
+        _event(
+            order,
+            f"payment.capture_{capture['status'].lower()}",
+            OrderEvent.Source.PAYPAL,
+            {"capture_id": capture["id"], "amount": capture["amount"]},
+            event_key,
+        )
+    return order
+
+
+def _apply_capture_result(order_id, capture, inventory):
+    if capture["status"] in {"COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED"}:
+        return _mark_paid(order_id, capture)
+    order = _record_incomplete_capture(order_id, capture)
+    if capture["status"] in {"DECLINED", "FAILED"}:
+        return cancel_order(order.pk, inventory, capture_definitely_absent=True)
     return order
 
 
@@ -505,22 +775,27 @@ def capture_paypal_order(order_id, client: PayPalClient, inventory: InventoryGat
         Order.Status.AWAITING_PAYMENT,
         Order.Status.PAYMENT_PROCESSING,
         Order.Status.CAPTURE_PENDING,
+        Order.Status.FUNDING_RETRY,
     }:
         raise OrderStateError("This order cannot be captured.")
     _validate_us_destination(order.shipping_country_code, order.shipping_region)
 
-    paypal_order = client.get_order(order.paypal_order_id)
-    if paypal_order["id"] != order.paypal_order_id:
+    paypal_order = _paypal_object(client.get_order(order.paypal_order_id), "order")
+    paypal_order_id = _paypal_text(paypal_order.get("id"), "order ID")
+    paypal_status = _paypal_text(paypal_order.get("status"), "order status")
+    if paypal_order_id != order.paypal_order_id:
         raise PaymentDataError("PayPal order identity does not match the order.")
-    if paypal_order["status"] == "VOIDED":
+    if paypal_status == "VOIDED":
         cancel_order(order.pk, inventory, capture_definitely_absent=True)
         raise PayPalOrderInactive("The PayPal checkout has ended.")
     _validate_paypal_order(order, paypal_order)
-    if paypal_order["status"] == "COMPLETED":
-        return _mark_paid(order.pk, _completed_capture(order, paypal_order))
+    if paypal_status == "COMPLETED":
+        return _apply_capture_result(
+            order.pk, _capture_from_order(order, paypal_order), inventory
+        )
 
     if order.status != Order.Status.CAPTURE_PENDING:
-        _begin_payment_processing(order.pk, paypal_order["status"])
+        _begin_payment_processing(order.pk, paypal_status)
         try:
             _commit_reservations(order.pk, inventory)
         except (EbayInventoryConflict, InventoryUnavailable):
@@ -528,10 +803,16 @@ def capture_paypal_order(order_id, client: PayPalClient, inventory: InventoryGat
             cancel_order(order.pk, inventory)
             raise
         _mark_capture_pending(order.pk)
-    response = client.capture_order(
-        order.paypal_order_id, request_id=f"capture-{order.reference}"
+    try:
+        response = client.capture_order(
+            order.paypal_order_id, request_id=f"capture-{order.reference}"
+        )
+    except PayPalInstrumentDeclined:
+        _mark_funding_retry(order.pk)
+        raise
+    return _apply_capture_result(
+        order.pk, _capture_from_order(order, response), inventory
     )
-    return _mark_paid(order.pk, _completed_capture(order, response))
 
 
 def _release_reservations(order_id, inventory):
@@ -575,8 +856,9 @@ def _release_reservations(order_id, inventory):
             )
             if reservation.status == InventoryReservation.Status.RELEASED:
                 continue
-            reservation.status = InventoryReservation.Status.RELEASING
-            reservation.save(update_fields=("status", "updated_at"))
+            if reservation.status != InventoryReservation.Status.RELEASING:
+                reservation.status = InventoryReservation.Status.RELEASING
+                reservation.save(update_fields=("status", "updated_at"))
         inventory.release(reservation)
         with transaction.atomic():
             reservation = InventoryReservation.objects.select_for_update().get(
@@ -598,7 +880,9 @@ def cancel_order(order_id, inventory: InventoryGateway, capture_definitely_absen
             Order.Status.CANCELLED,
         }
         if capture_definitely_absent:
-            allowed.add(Order.Status.CAPTURE_PENDING)
+            allowed.update(
+                {Order.Status.CAPTURE_PENDING, Order.Status.FUNDING_RETRY}
+            )
         if order.status not in allowed:
             raise OrderStateError("Only unpaid orders can be cancelled.")
         if order.status != Order.Status.CANCELLED:
@@ -627,22 +911,72 @@ def expire_due_orders(inventory: InventoryGateway, now=None):
     return len(orders)
 
 
+@transaction.atomic
+def _mark_expired(order_id, paypal_status):
+    order = Order.objects.select_for_update().get(pk=order_id)
+    if order.status == Order.Status.EXPIRED:
+        return order
+    if order.status != Order.Status.CANCELLED:
+        raise OrderStateError("Only a cancelled order can expire.")
+    order.status = Order.Status.EXPIRED
+    order.paypal_status = paypal_status
+    order.save(update_fields=("status", "paypal_status", "updated_at"))
+    _event(order, "order.expired", OrderEvent.Source.SYSTEM)
+    return order
+
+
+def reconcile_due_funding_retry(
+    order_id, client: PayPalClient, inventory: InventoryGateway, now=None
+):
+    now = now or timezone.now()
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order_id)
+        if order.status != Order.Status.FUNDING_RETRY or order.expires_at > now:
+            raise OrderStateError("This payment-method retry is not due for expiration.")
+    response = _paypal_object(client.get_order(order.paypal_order_id), "order")
+    paypal_order_id = _paypal_text(response.get("id"), "order ID")
+    paypal_status = _paypal_text(response.get("status"), "order status")
+    if paypal_order_id != order.paypal_order_id:
+        raise PaymentDataError("PayPal order identity does not match the order.")
+    if paypal_status == "COMPLETED":
+        _validate_paypal_order(order, response)
+        return _apply_capture_result(
+            order.pk, _capture_from_order(order, response), inventory
+        )
+    if paypal_status not in {"CREATED", "PAYER_ACTION_REQUIRED", "APPROVED", "VOIDED"}:
+        raise PaymentDataError("PayPal returned an unsupported order status.")
+    cancel_order(order.pk, inventory, capture_definitely_absent=True)
+    return _mark_expired(order.pk, paypal_status)
+
+
 def _apply_refund(order, refund_id, amount, now):
     existing = Refund.objects.filter(paypal_refund_id=refund_id).first()
     if existing:
         if existing.order_id != order.pk or existing.amount != amount:
             raise PaymentDataError("PayPal refund data does not match its prior record.")
-        return False
+        if existing.status == Refund.Status.COMPLETED:
+            return False
+        existing.status = Refund.Status.COMPLETED
+        existing.save(update_fields=("status", "updated_at"))
     if amount <= 0 or order.refunded_total + amount > order.total:
         raise PaymentDataError("PayPal refund amount is invalid.")
-    Refund.objects.create(order=order, paypal_refund_id=refund_id, amount=amount)
+    if existing is None:
+        Refund.objects.create(
+            order=order,
+            paypal_refund_id=refund_id,
+            amount=amount,
+            status=Refund.Status.COMPLETED,
+        )
     order.refunded_total += amount
     order.paypal_refund_id = refund_id
     if order.refunded_total == order.total:
-        order.status = Order.Status.REFUNDED
         order.refunded_at = now
-    else:
-        order.status = Order.Status.PARTIALLY_REFUNDED
+    if order.paid_at:
+        order.status = (
+            Order.Status.REFUNDED
+            if order.refunded_total == order.total
+            else Order.Status.PARTIALLY_REFUNDED
+        )
     order.save(
         update_fields=(
             "refunded_total",
@@ -655,69 +989,342 @@ def _apply_refund(order, refund_id, amount, now):
     return True
 
 
+def _validated_refund_response(order, response, amount):
+    response = _paypal_object(response, "refund")
+    refund_id = _paypal_text(response.get("id"), "refund ID")
+    provider_status = _paypal_text(response.get("status"), "refund status")
+    if provider_status not in PAYPAL_REFUND_STATUSES:
+        raise PaymentDataError("PayPal refund status is invalid.")
+    currency, refund_amount = _paypal_amount(response.get("amount"))
+    if currency != order.currency or refund_amount != amount:
+        raise PaymentDataError("PayPal refund amount does not match the request.")
+    return response, refund_id, PAYPAL_REFUND_STATUSES[provider_status]
+
+
 @transaction.atomic
 def refund_order(order_id, client: PayPalClient):
     order = Order.objects.select_for_update().get(pk=order_id)
-    if order.status == Order.Status.REFUNDED:
-        return order
     if not order.paypal_capture_id or not order.paid_at:
         raise OrderStateError("Only captured orders can be refunded.")
+    if order.refunded_total == order.total:
+        return order
+    unresolved = order.refunds.filter(status=Refund.Status.PENDING).first()
+    if unresolved:
+        order.paypal_refund_id = unresolved.paypal_refund_id
+        order.save(update_fields=("paypal_refund_id", "updated_at"))
+        return order
     amount = order.total - order.refunded_total
+    attempt = order.refunds.count() + 1
     response = client.refund_capture(
         order.paypal_capture_id,
         _money(amount),
         order.currency,
-        f"{order.reference}-REFUND",
-        request_id=f"refund-{order.reference}",
+        f"{order.reference}-REFUND-{attempt}",
+        request_id=f"refund-{order.reference}-{attempt}",
     )
-    if response["status"] != "COMPLETED":
-        raise PaymentDataError("PayPal refund is not complete.")
-    if response["amount"]["currency_code"] != order.currency or Decimal(
-        response["amount"]["value"]
-    ) != amount:
-        raise PaymentDataError("PayPal refund amount does not match the request.")
-    _apply_refund(order, response["id"], amount, timezone.now())
+    response, refund_id, refund_status = _validated_refund_response(
+        order, response, amount
+    )
+    if refund_status == Refund.Status.COMPLETED:
+        _apply_refund(order, refund_id, amount, timezone.now())
+    else:
+        Refund.objects.create(
+            order=order,
+            paypal_refund_id=refund_id,
+            amount=amount,
+            status=refund_status,
+        )
+        order.paypal_refund_id = refund_id
+        order.save(update_fields=("paypal_refund_id", "updated_at"))
     _event(
         order,
-        "payment.refunded",
+        (
+            "payment.refunded"
+            if refund_status == Refund.Status.COMPLETED
+            else f"payment.refund_{refund_status}"
+        ),
         OrderEvent.Source.PAYPAL,
-        {"refund_id": response["id"], "amount": response["amount"]},
-        f"paypal-refund:{response['id']}:completed",
+        {"refund_id": refund_id, "amount": response["amount"]},
+        f"paypal-refund:{refund_id}:{refund_status}",
     )
     return order
 
 
+def reconcile_pending_refund(refund_id, client: PayPalClient):
+    refund = Refund.objects.select_related("order").get(pk=refund_id)
+    if refund.status != Refund.Status.PENDING:
+        return refund
+    response, paypal_refund_id, status = _validated_refund_response(
+        refund.order,
+        client.get_refund(refund.paypal_refund_id),
+        refund.amount,
+    )
+    if paypal_refund_id != refund.paypal_refund_id:
+        raise PaymentDataError("PayPal refund identity does not match the order.")
+    if _refund_capture_id(response) != refund.order.paypal_capture_id:
+        raise PaymentDataError("PayPal refund capture does not match the order.")
+    if status == Refund.Status.PENDING:
+        return refund
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=refund.order_id)
+        refund = Refund.objects.select_for_update().get(pk=refund_id)
+        if refund.status != Refund.Status.PENDING:
+            return refund
+        if status == Refund.Status.COMPLETED:
+            _apply_refund(order, refund.paypal_refund_id, refund.amount, timezone.now())
+        else:
+            refund.status = status
+            refund.save(update_fields=("status", "updated_at"))
+        _event(
+            order,
+            (
+                "payment.refunded"
+                if status == Refund.Status.COMPLETED
+                else f"payment.refund_{status}"
+            ),
+            OrderEvent.Source.PAYPAL,
+            {"refund_id": refund.paypal_refund_id, "amount": response["amount"]},
+            f"paypal-refund:{refund.paypal_refund_id}:{status}",
+        )
+    return Refund.objects.get(pk=refund_id)
+
+
 def _shipment_status(paypal_status):
-    return {
-        "SHIPPED": Shipment.Status.SHIPPED,
-        "ON_HOLD": Shipment.Status.ON_HOLD,
-        "DELIVERED": Shipment.Status.DELIVERED,
+    statuses = {
         "CANCELLED": Shipment.Status.CANCELLED,
-    }[paypal_status]
+        "DELIVERED": Shipment.Status.DELIVERED,
+        "LOCAL_PICKUP": Shipment.Status.DELIVERED,
+        "ON_HOLD": Shipment.Status.ON_HOLD,
+        "SHIPPED": Shipment.Status.SHIPPED,
+        "SHIPMENT_CREATED": Shipment.Status.LABEL_CREATED,
+        "DROPPED_OFF": Shipment.Status.SHIPPED,
+        "IN_TRANSIT": Shipment.Status.SHIPPED,
+        "RETURNED": Shipment.Status.ON_HOLD,
+        "LABEL_PRINTED": Shipment.Status.LABEL_CREATED,
+        "ERROR": Shipment.Status.ON_HOLD,
+        "UNCONFIRMED": Shipment.Status.ON_HOLD,
+        "PICKUP_FAILED": Shipment.Status.ON_HOLD,
+        "DELIVERY_DELAYED": Shipment.Status.ON_HOLD,
+        "DELIVERY_SCHEDULED": Shipment.Status.SHIPPED,
+        "DELIVERY_FAILED": Shipment.Status.ON_HOLD,
+        "INRETURN": Shipment.Status.ON_HOLD,
+        "IN_PROCESS": Shipment.Status.LABEL_CREATED,
+        "NEW": Shipment.Status.LABEL_CREATED,
+        "VOID": Shipment.Status.CANCELLED,
+        "PROCESSED": Shipment.Status.LABEL_CREATED,
+        "NOT_SHIPPED": Shipment.Status.LABEL_CREATED,
+        "COMPLETED": Shipment.Status.DELIVERED,
+    }
+    if paypal_status not in statuses:
+        raise PaymentDataError("PayPal shipment status is invalid.")
+    return statuses[paypal_status]
 
 
-def _record_paypal_tracking(order, resource, now):
-    status = _shipment_status(resource["status"])
+def _refund_capture_id(resource):
+    resource_links = resource.get("links")
+    if not isinstance(resource_links, list) or any(
+        not isinstance(link, dict) for link in resource_links
+    ):
+        raise PaymentDataError("PayPal refund links are invalid.")
+    links = [link for link in resource_links if link.get("rel") == "up"]
+    if len(links) != 1:
+        raise PaymentDataError("PayPal refund must link to one capture.")
+    href = links[0].get("href")
+    if not isinstance(href, str):
+        raise PaymentDataError("PayPal refund capture link is invalid.")
+    url = urlsplit(href)
+    path = url.path.split("/")
+    if (
+        url.scheme != "https"
+        or not url.netloc
+        or path[1:4] != ["v2", "payments", "captures"]
+        or len(path) != 5
+        or not path[4]
+    ):
+        raise PaymentDataError("PayPal refund capture link is invalid.")
+    return path[4]
+
+
+def _refresh_fulfillment_status(order, now):
+    active_shipments = list(
+        order.shipments.exclude(status=Shipment.Status.CANCELLED).values_list(
+            "status", "completes_order"
+        )
+    )
+    has_shipped = any(
+        status in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}
+        for status, _ in active_shipments
+    )
+    fulfillment_complete = any(
+        completes_order and status in FINAL_SHIPMENT_STATUSES
+        for status, completes_order in active_shipments
+    )
+    if order.paid_at:
+        if order.refunded_total > 0:
+            order.status = (
+                Order.Status.REFUNDED
+                if order.refunded_total == order.total
+                else Order.Status.PARTIALLY_REFUNDED
+            )
+        elif fulfillment_complete:
+            order.status = Order.Status.SHIPPED
+        elif active_shipments:
+            order.status = Order.Status.FULFILLING
+        else:
+            order.status = Order.Status.PAID
+    order.shipped_at = (order.shipped_at or now) if has_shipped else None
+    order.save(update_fields=("status", "shipped_at", "updated_at"))
+
+
+def _record_paypal_tracking(order, resource, now, provider_updated_at):
+    paypal_status = resource.get("status")
+    if not isinstance(paypal_status, str):
+        raise PaymentDataError("PayPal tracking data is missing its status.")
+    status = _shipment_status(paypal_status)
+    tracking_number = resource.get("tracking_number", "")
+    carrier = resource.get("carrier", "")
+    if not isinstance(tracking_number, str) or not isinstance(carrier, str):
+        raise PaymentDataError("PayPal tracking data is invalid.")
+    tracking_number = tracking_number.strip()
+    carrier = carrier.strip()
+    if tracking_number and not carrier:
+        raise PaymentDataError("PayPal tracking data is missing its carrier.")
+    if carrier == "OTHER":
+        carrier = resource.get("carrier_name_other", "")
+        if not isinstance(carrier, str) or not carrier.strip():
+            raise PaymentDataError("PayPal tracking data is missing the carrier name.")
+        carrier = carrier.strip()
     shipment, created = Shipment.objects.get_or_create(
         order=order,
-        carrier=resource["carrier"],
-        tracking_number=resource["tracking_number"],
+        tracking_number=tracking_number,
         defaults={
+            "carrier": carrier,
             "status": status,
             "source": Shipment.Source.PAYPAL,
+            "provider_updated_at": provider_updated_at,
+            "completes_order": False,
         },
     )
     if not created:
+        if provider_updated_at and (
+            shipment.provider_updated_at
+            and provider_updated_at <= shipment.provider_updated_at
+        ):
+            return False
+        if provider_updated_at is None and (
+            shipment.carrier == carrier
+            and shipment.status == status
+            and shipment.source == Shipment.Source.PAYPAL
+        ):
+            return False
+        shipment.carrier = carrier
         shipment.status = status
-    if status == Shipment.Status.SHIPPED and not shipment.shipped_at:
-        shipment.shipped_at = now
-    if status == Shipment.Status.DELIVERED and not shipment.delivered_at:
-        shipment.delivered_at = now
+        shipment.source = Shipment.Source.PAYPAL
+        if provider_updated_at:
+            shipment.provider_updated_at = provider_updated_at
+    status_time = provider_updated_at or now
+    if (
+        status in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}
+        and not shipment.shipped_at
+    ):
+        shipment.shipped_at = status_time
+    if status not in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}:
+        shipment.shipped_at = None
+    shipment.delivered_at = (
+        shipment.delivered_at or status_time
+        if status == Shipment.Status.DELIVERED
+        else None
+    )
     shipment.save()
-    if status in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}:
-        order.status = Order.Status.SHIPPED
-        order.shipped_at = order.shipped_at or now
-        order.save(update_fields=("status", "shipped_at", "updated_at"))
+    _refresh_fulfillment_status(order, now)
+    return True
+
+
+def reconcile_paypal_tracking(order_id, client: PayPalClient):
+    order = Order.objects.get(pk=order_id)
+    if not order.paid_at:
+        raise OrderStateError("Only paid orders can reconcile PayPal tracking.")
+    if not order.paypal_order_id or not order.paypal_capture_id:
+        raise PaymentDataError("PayPal payment identity is incomplete.")
+
+    paypal_order = _paypal_object(client.get_order(order.paypal_order_id), "order")
+    purchase = _validate_paypal_order(order, paypal_order)
+    capture = _capture_from_order(order, paypal_order)
+    if capture["id"] != order.paypal_capture_id:
+        raise PaymentDataError("PayPal capture identity does not match the order.")
+
+    shipping = _paypal_object(purchase.get("shipping"), "shipping data")
+    summaries = _paypal_list(shipping.get("trackers", []), "trackers")
+    trackers = []
+    tracker_ids = set()
+    for summary in summaries:
+        summary = _paypal_object(summary, "tracker summary")
+        tracker_id = _paypal_text(summary.get("id"), "tracker ID")
+        if tracker_id in tracker_ids:
+            raise PaymentDataError("PayPal returned a duplicate tracker ID.")
+        if not tracker_id.startswith(f"{order.paypal_capture_id}-"):
+            raise PaymentDataError("PayPal tracker identity does not match the order.")
+        tracker_ids.add(tracker_id)
+
+        tracker = _paypal_object(client.get_tracker(tracker_id), "tracker")
+        transaction_id = _paypal_text(
+            tracker.get("transaction_id"), "tracking transaction ID"
+        )
+        if transaction_id != order.paypal_capture_id:
+            raise PaymentDataError("PayPal tracker transaction does not match the order.")
+        tracking_number = tracker.get("tracking_number", "")
+        if isinstance(tracking_number, str) and tracking_number:
+            if tracker_id != f"{transaction_id}-{tracking_number}":
+                raise PaymentDataError("PayPal tracker identity does not match its data.")
+        _shipment_status(_paypal_text(tracker.get("status"), "tracking status"))
+        last_updated_time = tracker.get("last_updated_time")
+        provider_updated_at = None
+        if last_updated_time is not None:
+            provider_updated_at = parse_datetime(
+                _paypal_text(last_updated_time, "tracking update time")
+            )
+            if provider_updated_at is None or timezone.is_naive(provider_updated_at):
+                raise PaymentDataError("PayPal tracking update time is invalid.")
+        trackers.append((tracker_id, tracker, provider_updated_at))
+
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order_id)
+        if not order.paid_at:
+            raise OrderStateError("Only paid orders can reconcile PayPal tracking.")
+        if (
+            order.paypal_order_id != paypal_order["id"]
+            or order.paypal_capture_id != capture["id"]
+        ):
+            raise PaymentDataError("PayPal payment identity changed during reconciliation.")
+        now = timezone.now()
+        for tracker_id, tracker, provider_updated_at in trackers:
+            if not _record_paypal_tracking(order, tracker, now, provider_updated_at):
+                continue
+            provider_timestamp = (
+                provider_updated_at.isoformat() if provider_updated_at else None
+            )
+            event_key = None
+            if provider_timestamp:
+                event_identity = "\0".join(
+                    (tracker_id, provider_timestamp, tracker["status"])
+                )
+                event_key = (
+                    "paypal-tracker:"
+                    f"{hashlib.sha256(event_identity.encode()).hexdigest()}"
+                )
+            _event(
+                order,
+                "shipment.reconciled",
+                OrderEvent.Source.PAYPAL,
+                {
+                    "tracker_id": tracker_id,
+                    "tracking_number": tracker.get("tracking_number", ""),
+                    "status": tracker["status"],
+                    "provider_updated_at": provider_timestamp,
+                },
+                event_key,
+            )
+    return order
 
 
 @transaction.atomic
@@ -746,105 +1353,135 @@ def process_paypal_webhook(
     if not client.verify_webhook_signature(headers, event):
         raise WebhookVerificationError("PayPal webhook signature is invalid.")
 
-    event_id = event["id"]
+    event_id = event.get("id")
+    event_type = event.get("event_type")
+    if not isinstance(event_id, str) or not event_id:
+        raise PaymentDataError("PayPal webhook event ID is invalid.")
+    if not isinstance(event_type, str) or not event_type:
+        raise PaymentDataError("PayPal webhook event type is invalid.")
     existing = OrderEvent.objects.select_related("order").filter(
         event_key=f"paypal-webhook:{event_id}"
     ).first()
     if existing:
         return existing.order
 
-    event_type = event["event_type"]
-    resource = event["resource"]
+    supported_event_types = {
+        "CHECKOUT.ORDER.APPROVED",
+        "PAYMENT.CAPTURE.COMPLETED",
+        "PAYMENT.CAPTURE.PENDING",
+        "PAYMENT.CAPTURE.DECLINED",
+        "PAYMENT.CAPTURE.REFUNDED",
+    }
+    if event_type not in supported_event_types:
+        return None
+    resource = event.get("resource")
+    if not isinstance(resource, dict):
+        raise PaymentDataError("PayPal webhook resource is invalid.")
     now = timezone.now()
     if event_type == "CHECKOUT.ORDER.APPROVED":
-        order = Order.objects.get(paypal_order_id=resource["id"])
-        order = capture_paypal_order(order.pk, client, inventory)
-        resource_id = resource["id"]
-    elif event_type == "CHECKOUT.ORDER.VOIDED":
-        order = Order.objects.get(paypal_order_id=resource["id"])
-        resource_id = resource["id"]
-        if order.status in {
-            Order.Status.AWAITING_PAYMENT,
-            Order.Status.PAYMENT_PROCESSING,
-            Order.Status.CAPTURE_PENDING,
-        }:
-            cancel_order(order.pk, inventory, capture_definitely_absent=True)
-            with transaction.atomic():
-                order = Order.objects.select_for_update().get(pk=order.pk)
-                order.status = Order.Status.EXPIRED
-                order.paypal_status = resource["status"]
-                order.save(update_fields=("status", "paypal_status", "updated_at"))
-    elif event_type == "PAYMENT.CAPTURE.COMPLETED":
-        paypal_order_id = resource["supplementary_data"]["related_ids"]["order_id"]
+        resource_id = resource.get("id")
+        if not isinstance(resource_id, str) or not resource_id:
+            raise PaymentDataError("PayPal order ID is invalid.")
+        order = Order.objects.get(paypal_order_id=resource_id)
+        if order.status not in {Order.Status.CANCELLED, Order.Status.EXPIRED}:
+            try:
+                order = capture_paypal_order(order.pk, client, inventory)
+            except PayPalInstrumentDeclined:
+                order.refresh_from_db()
+    elif event_type in {
+        "PAYMENT.CAPTURE.COMPLETED",
+        "PAYMENT.CAPTURE.PENDING",
+        "PAYMENT.CAPTURE.DECLINED",
+    }:
+        supplementary_data = resource.get("supplementary_data")
+        related_ids = (
+            supplementary_data.get("related_ids")
+            if isinstance(supplementary_data, dict)
+            else None
+        )
+        paypal_order_id = (
+            related_ids.get("order_id") if isinstance(related_ids, dict) else None
+        )
+        if not isinstance(paypal_order_id, str) or not paypal_order_id:
+            raise PaymentDataError("PayPal capture order ID is invalid.")
         order = Order.objects.get(paypal_order_id=paypal_order_id)
-        if resource["status"] != "COMPLETED":
-            raise PaymentDataError("PayPal capture is not complete.")
-        _validate_amount(order, resource["amount"])
-        order = _mark_paid(order.pk, resource)
-        resource_id = resource["id"]
+        expected_status = event_type.rsplit(".", 1)[1]
+        if resource.get("status") != expected_status:
+            raise PaymentDataError("PayPal capture status does not match the event.")
+        _validate_amount(order, resource.get("amount"))
+        resource_id = resource.get("id")
+        if not isinstance(resource_id, str) or not resource_id:
+            raise PaymentDataError("PayPal capture ID is invalid.")
+        order = _apply_capture_result(order.pk, resource, inventory)
     elif event_type == "PAYMENT.CAPTURE.REFUNDED":
-        capture_id = resource["supplementary_data"]["related_ids"]["capture_id"]
+        capture_id = _refund_capture_id(resource)
         with transaction.atomic():
             order = Order.objects.select_for_update().get(paypal_capture_id=capture_id)
-            if resource["amount"]["currency_code"] != order.currency:
+            amount = resource.get("amount")
+            currency, refund_amount = _paypal_amount(amount)
+            resource_id = resource.get("id")
+            if not isinstance(resource_id, str) or not resource_id:
+                raise PaymentDataError("PayPal refund ID is invalid.")
+            if currency != order.currency:
                 raise PaymentDataError("PayPal refund currency does not match the order.")
-            _apply_refund(
-                order, resource["id"], Decimal(resource["amount"]["value"]), now
-            )
-        resource_id = resource["id"]
-    elif event_type in {
-        "SHIPPING.TRACKING.CREATED",
-        "SHIPPING.TRACKING.UPDATED",
-        "SHIPPING.TRACKING.CANCELLED",
-    }:
-        with transaction.atomic():
-            order = Order.objects.select_for_update().get(
-                paypal_capture_id=resource["transaction_id"]
-            )
-            _record_paypal_tracking(order, resource, now)
-        resource_id = f"{resource['transaction_id']}:{resource['tracking_number']}"
-    else:
-        return None
-
+            _apply_refund(order, resource_id, refund_amount, now)
     return _record_webhook_event(order.pk, event_id, event_type, resource_id)
 
 
 @transaction.atomic
 def record_manual_shipment(
-    order_id, carrier, tracking_number, status=Shipment.Status.SHIPPED
+    order_id,
+    carrier,
+    tracking_number,
+    status=Shipment.Status.SHIPPED,
+    completes_order=True,
 ):
+    carrier = carrier.strip()
+    tracking_number = tracking_number.strip()
+    if tracking_number and not carrier:
+        raise ValueError("Enter a carrier when a tracking number is provided.")
     order = Order.objects.select_for_update().get(pk=order_id)
-    if order.status not in {
-        Order.Status.PAID,
-        Order.Status.FULFILLING,
-        Order.Status.SHIPPED,
-        Order.Status.PARTIALLY_REFUNDED,
-    }:
+    if order.status not in SHIPPABLE_ORDER_STATUSES:
         raise OrderStateError("Only paid orders can be shipped.")
     if status not in Shipment.Status.values:
         raise ValueError("Shipment status is invalid.")
     now = timezone.now()
-    shipment, created = Shipment.objects.get_or_create(
-        order=order,
-        carrier=carrier,
-        tracking_number=tracking_number,
-        defaults={"status": status, "source": Shipment.Source.MANUAL},
+    shipment = Shipment.objects.filter(
+        order=order, tracking_number=tracking_number
+    ).first()
+    if shipment is None:
+        if order.refunds.filter(status=Refund.Status.PENDING).exists():
+            raise OrderStateError(
+                "Orders with a pending refund cannot receive a new shipment."
+            )
+        shipment = Shipment(
+            order=order,
+            tracking_number=tracking_number,
+            source=Shipment.Source.MANUAL,
+        )
+        created = True
+    else:
+        created = False
+    previous = (
+        None
+        if created
+        else (shipment.carrier, shipment.status, shipment.completes_order)
     )
-    previous_status = None if created else shipment.status
+    shipment.carrier = carrier
     shipment.status = status
+    shipment.completes_order = completes_order
     if status in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}:
         shipment.shipped_at = shipment.shipped_at or now
-    if status == Shipment.Status.DELIVERED:
-        shipment.delivered_at = shipment.delivered_at or now
+    else:
+        shipment.shipped_at = None
+    shipment.delivered_at = (
+        shipment.delivered_at or now
+        if status == Shipment.Status.DELIVERED
+        else None
+    )
     shipment.save()
-    if status == Shipment.Status.LABEL_CREATED and order.status == Order.Status.PAID:
-        order.status = Order.Status.FULFILLING
-        order.save(update_fields=("status", "updated_at"))
-    if status in {Shipment.Status.SHIPPED, Shipment.Status.DELIVERED}:
-        order.status = Order.Status.SHIPPED
-        order.shipped_at = order.shipped_at or now
-        order.save(update_fields=("status", "shipped_at", "updated_at"))
-    if created or previous_status != status:
+    _refresh_fulfillment_status(order, now)
+    if created or previous != (carrier, status, completes_order):
         _event(
             order,
             "shipment.recorded" if created else "shipment.updated",
@@ -853,6 +1490,7 @@ def record_manual_shipment(
                 "carrier": carrier,
                 "tracking_number": tracking_number,
                 "status": status,
+                "completes_order": completes_order,
             },
         )
     return shipment

@@ -1,49 +1,62 @@
-const menuToggle = document.querySelector("[data-menu-toggle]");
-const siteNav = document.querySelector("[data-site-nav]");
-
-if (menuToggle && siteNav) {
-  menuToggle.addEventListener("click", () => {
-    const open = menuToggle.getAttribute("aria-expanded") !== "true";
-    menuToggle.setAttribute("aria-expanded", String(open));
-    menuToggle.querySelector(".sr-only").textContent = open ? "Close menu" : "Open menu";
-    siteNav.dataset.open = String(open);
-  });
-}
-
 const galleryImage = document.querySelector("[data-gallery-image]");
-const galleryButtons = document.querySelectorAll("[data-gallery-thumb]");
+const galleryLink = document.querySelector("[data-gallery-link]");
+const galleryThumbs = document.querySelectorAll("[data-gallery-thumb]");
 
-for (const button of galleryButtons) {
-  button.addEventListener("click", () => {
-    galleryImage.src = button.dataset.imageSrc;
-    galleryImage.alt = button.dataset.imageAlt;
-    for (const other of galleryButtons) other.setAttribute("aria-current", "false");
-    button.setAttribute("aria-current", "true");
+for (const thumbnail of galleryThumbs) {
+  thumbnail.addEventListener("click", (event) => {
+    event.preventDefault();
+    galleryImage.hidden = false;
+    galleryLink.hidden = false;
+    galleryImage.src = thumbnail.dataset.imageSrc;
+    galleryImage.alt = thumbnail.dataset.imageAlt;
+    galleryLink.href = thumbnail.dataset.imageSrc;
+    galleryLink.setAttribute("aria-label", thumbnail.dataset.imageLabel);
+    for (const other of galleryThumbs) other.setAttribute("aria-current", "false");
+    thumbnail.setAttribute("aria-current", "true");
   });
 }
 
 for (const stepper of document.querySelectorAll("[data-quantity-stepper]")) {
   const input = stepper.querySelector("input[type='number']");
+  const decrement = stepper.querySelector("[data-step='down']");
+  const increment = stepper.querySelector("[data-step='up']");
+  const syncButtons = () => {
+    const value = input.valueAsNumber;
+    const minimum = Number(input.min);
+    const maximum = Number(input.max);
+    const invalid = input.disabled || !Number.isFinite(value);
+    decrement.disabled = invalid || value <= minimum;
+    increment.disabled = invalid || value >= maximum;
+  };
   stepper.addEventListener("click", (event) => {
     const direction = event.target.closest("[data-step]")?.dataset.step;
     if (!direction) return;
     direction === "up" ? input.stepUp() : input.stepDown();
+    syncButtons();
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  input.addEventListener("input", syncButtons);
+  input.addEventListener("change", syncButtons);
+  syncButtons();
 }
 
 const variantSelector = document.querySelector("[data-variant-selector]");
 
 if (variantSelector) {
-  const price = document.querySelector("[data-product-price]");
+  const directPrice = document.querySelector("[data-product-price]");
+  const ebayPrice = document.querySelector("[data-ebay-price]");
   const prefix = document.querySelector("[data-price-prefix]");
   const quantity = document.querySelector("[data-product-quantity]");
+  const initialDirectPrice = directPrice.textContent;
+  const initialEbayPrice = ebayPrice.textContent;
+  const initialPrefix = prefix.textContent;
+  const initialMaximum = quantity.max;
   variantSelector.addEventListener("change", () => {
     const option = variantSelector.selectedOptions[0];
-    if (!option.dataset.price) return;
-    price.textContent = option.dataset.price;
-    prefix.textContent = "";
-    quantity.max = option.dataset.quantity;
+    directPrice.textContent = option.dataset.directPrice || initialDirectPrice;
+    ebayPrice.textContent = option.dataset.ebayPrice || initialEbayPrice;
+    prefix.textContent = option.dataset.directPrice ? "" : initialPrefix;
+    quantity.max = option.dataset.quantity || initialMaximum;
     if (Number(quantity.value) > Number(quantity.max)) quantity.value = quantity.max;
   });
 }
@@ -62,6 +75,7 @@ if (paypalCheckout && window.paypal) {
     if (!response.ok) {
       const requestError = new Error(payload.error);
       requestError.customerSafe = true;
+      requestError.code = payload.code;
       throw requestError;
     }
     return payload;
@@ -70,7 +84,12 @@ if (paypalCheckout && window.paypal) {
   const buttons = window.paypal.Buttons({
     style: { layout: "vertical", color: "black", shape: "rect", label: "paypal", height: 48 },
     createOrder: async () => {
-      if (!form.reportValidity()) throw new Error("Shipping details are incomplete.");
+      error.hidden = true;
+      if (!form.reportValidity()) {
+        const validationError = new Error("Complete the highlighted shipping details.");
+        validationError.customerSafe = true;
+        throw validationError;
+      }
       const payload = await requestJson(paypalCheckout.dataset.createUrl, {
         method: "POST",
         headers: { "X-CSRFToken": csrfToken, "X-Requested-With": "XMLHttpRequest" },
@@ -82,13 +101,23 @@ if (paypalCheckout && window.paypal) {
       }
       return payload.paypal_order_id;
     },
-    onApprove: async (data) => {
-      const payload = await requestJson(paypalCheckout.dataset.captureUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
-        body: JSON.stringify({ paypal_order_id: data.orderID }),
-      });
-      window.location.assign(payload.redirect_url);
+    onApprove: async (data, actions) => {
+      error.hidden = true;
+      try {
+        const payload = await requestJson(paypalCheckout.dataset.captureUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrfToken,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          body: JSON.stringify({ paypal_order_id: data.orderID }),
+        });
+        window.location.assign(payload.redirect_url);
+      } catch (captureError) {
+        if (captureError.code === "INSTRUMENT_DECLINED") return actions.restart();
+        throw captureError;
+      }
     },
     onError: (checkoutError) => {
       error.hidden = false;
@@ -104,4 +133,27 @@ if (paypalCheckout && window.paypal) {
 } else if (paypalCheckout) {
   document.querySelector("[data-paypal-loading]").textContent =
     "PayPal could not load. Refresh the page to try again.";
+}
+
+const copyOrderLink = document.querySelector("[data-copy-order-link]");
+
+if (copyOrderLink) {
+  const status = document.querySelector("[data-copy-order-status]");
+  copyOrderLink.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      status.textContent = "Private order link could not be copied.";
+      status.hidden = false;
+      return;
+    }
+    navigator.clipboard.writeText(window.location.href).then(
+      () => {
+        status.textContent = "Private order link copied.";
+        status.hidden = false;
+      },
+      () => {
+        status.textContent = "Private order link could not be copied.";
+        status.hidden = false;
+      },
+    );
+  });
 }

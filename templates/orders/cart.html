@@ -15,29 +15,32 @@
           {% for item in items %}
             <article class="line-item">
               <a class="line-item__image" href="{% url 'storefront:product_detail' slug=item.product.slug %}" aria-label="View {{ item.product.title }}">
+                <span class="image-placeholder" aria-hidden="true">No image</span>
                 {% with image=item.product.images.first %}
-                  {% if image %}<img src="{{ image.url }}" alt="{{ item.product.title }}" decoding="async">{% endif %}
+                  {% if image %}<img src="{{ image.url }}" alt="" decoding="async" onerror="this.hidden=true">{% endif %}
                 {% endwith %}
               </a>
               <div class="line-item__content">
                 <h2><a href="{% url 'storefront:product_detail' slug=item.product.slug %}">{{ item.product.title }}</a></h2>
                 {% if item.variant %}<p class="line-item__variant">{{ item.variant.title }}</p>{% endif %}
-                <form class="line-item__actions" method="post" action="{% url 'storefront:cart_update' line_id=item.line_id %}">
-                  {% csrf_token %}
-                  <div>
-                    <label class="sr-only" for="quantity-{{ item.line_id }}">Quantity for {{ item.product.title }}</label>
-                    <div class="quantity-stepper" data-quantity-stepper>
-                      <button type="button" data-step="down" aria-label="Decrease quantity">&minus;</button>
-                      <input id="quantity-{{ item.line_id }}" type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.available_quantity }}" inputmode="numeric"{% if not item.available_quantity %} disabled{% endif %} required>
-                      <button type="button" data-step="up" aria-label="Increase quantity">+</button>
+                <div class="line-item__controls">
+                  <form class="line-item__actions" method="post" action="{% url 'storefront:cart_update' line_id=item.line_id %}">
+                    {% csrf_token %}
+                    <div>
+                      <label class="sr-only" for="quantity-{{ item.line_id }}">Quantity for {{ item.product.title }}</label>
+                      <div class="quantity-stepper" data-quantity-stepper>
+                        <button type="button" data-step="down" aria-label="Decrease quantity for {{ item.product.title }}" aria-controls="quantity-{{ item.line_id }}"{% if not item.available_quantity or item.quantity <= 1 %} disabled{% endif %}>&minus;</button>
+                        <input id="quantity-{{ item.line_id }}" type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.available_quantity }}" inputmode="numeric"{% if not item.available_quantity %} disabled{% endif %} required>
+                        <button type="button" data-step="up" aria-label="Increase quantity for {{ item.product.title }}" aria-controls="quantity-{{ item.line_id }}"{% if not item.available_quantity or item.quantity >= item.available_quantity %} disabled{% endif %}>+</button>
+                      </div>
                     </div>
-                  </div>
-                  <button class="button button--quiet" type="submit"{% if not item.available_quantity %} disabled{% endif %}>Update</button>
-                </form>
-                <form method="post" action="{% url 'storefront:cart_remove' line_id=item.line_id %}">
-                  {% csrf_token %}
-                  <button class="button button--quiet" type="submit">Remove</button>
-                </form>
+                    <button class="button button--quiet" type="submit"{% if not item.available_quantity %} disabled{% endif %}>Update</button>
+                  </form>
+                  <form method="post" action="{% url 'storefront:cart_remove' line_id=item.line_id %}">
+                    {% csrf_token %}
+                    <button class="button button--quiet" type="submit">Remove</button>
+                  </form>
+                </div>
               </div>
               <p class="line-item__price price">${{ item.line_total|floatformat:2 }}</p>
             </article>
@@ -47,8 +50,9 @@
         <aside class="order-summary" aria-labelledby="summary-heading">
           <h2 id="summary-heading">Order summary</h2>
           <dl class="summary-rows">
-            <div class="summary-row"><dt>Items</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
+            <div class="summary-row"><dt>Direct subtotal</dt><dd>${{ subtotal|floatformat:2 }}</dd></div>
             <div class="summary-row"><dt>Shipping</dt><dd>${{ shipping|floatformat:2 }}</dd></div>
+            <div class="summary-row"><dt>Tax</dt><dd>$0.00</dd></div>
             <div class="summary-row summary-row--total"><dt>Total</dt><dd>${{ total|floatformat:2 }} USD</dd></div>
           </dl>
           {% if checkout_enabled and cart_valid %}

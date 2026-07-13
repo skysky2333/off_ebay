@@ -7,7 +7,10 @@
     <Description><![CDATA[<p>Clean <strong>example</strong>.</p><script>alert(1)</script>]]></Description>
     <StartPrice currencyID="USD">19.00</StartPrice>
     <Quantity>5</Quantity>
-    <SellingStatus><QuantitySold>1</QuantitySold></SellingStatus>
+    <SellingStatus>
+      <QuantitySold>1</QuantitySold>
+      <ListingStatus>Active</ListingStatus>
+    </SellingStatus>
     <ConditionDisplayName>New</ConditionDisplayName>
     <PrimaryCategory>
       <CategoryID>123</CategoryID>

@@ -1,0 +1,88 @@
+<section class="operations-dashboard" aria-labelledby="operations-title">
+  <header class="operations-header">
+    <div>
+      <p class="operations-eyebrow">Store overview</p>
+      <h1 id="operations-title">Operations</h1>
+    </div>
+    {% if can_request_sync %}
+      <form method="post" action="{{ sync_url }}">
+        {% csrf_token %}
+        <button class="button" type="submit"{% if not can_sync %} disabled{% endif %}>{% if sync_in_progress %}Sync in progress{% else %}Sync catalog now{% endif %}</button>
+      </form>
+    {% endif %}
+  </header>
+
+  {% if can_view_store or can_view_orders or can_view_inventory or can_view_refunds %}<div class="operations-metrics">
+    {% if can_view_store %}
+      <a class="operations-metric" data-state="{% if checkout_is_enabled %}clear{% else %}attention{% endif %}" href="{{ store_settings_url }}">
+        <span>Checkout</span>
+        <strong>{% if checkout_is_enabled %}Open{% else %}Paused{% endif %}</strong>
+      </a>
+    {% endif %}
+    {% if can_view_orders %}
+      <a class="operations-metric" data-state="{% if fulfillment_count %}attention{% else %}clear{% endif %}" href="{% url 'admin:orders_order_changelist' %}?fulfillment=needed">
+        <span>Needs fulfillment</span>
+        <strong>{{ fulfillment_count }}</strong>
+      </a>
+      <a class="operations-metric" data-state="{% if payment_review_count %}attention{% else %}clear{% endif %}" href="{% url 'admin:orders_order_changelist' %}?payment_review=needed">
+        <span>Payment review</span>
+        <strong>{{ payment_review_count }}</strong>
+      </a>
+    {% endif %}
+    {% if can_view_inventory %}
+      <a class="operations-metric" data-state="{% if failed_inventory_count %}danger{% else %}clear{% endif %}" href="{% url 'admin:catalog_inventoryoperation_changelist' %}?status__exact=failed">
+        <span>Inventory failure history</span>
+        <strong>{{ failed_inventory_count }}</strong>
+      </a>
+    {% endif %}
+    {% if can_view_refunds %}
+      <a class="operations-metric" data-state="{% if failed_refund_count %}danger{% elif refund_review_count %}attention{% else %}clear{% endif %}" href="{% url 'admin:orders_refund_changelist' %}?refund_review=needed">
+        <span>Refund review</span>
+        <strong>{{ refund_review_count }}</strong>
+        {% if failed_refund_count %}<small>{{ failed_refund_count }} unsuccessful</small>{% endif %}
+      </a>
+    {% endif %}
+  </div>{% endif %}
+
+  {% if can_view_sync %}<div class="operations-sync">
+    <div>
+      <span>Catalog sync</span>
+      <strong class="operations-state operations-state--{{ sync_state }}">{{ sync_label }}</strong>
+    </div>
+    {% if not ebay_configured %}
+      <p>Configure the eBay credentials to enable catalog sync.</p>
+    {% elif last_sync %}
+      <p>{{ last_sync.started_at|date:"M j, Y g:i A" }} · {{ last_sync.imported_count }} imported · {{ last_sync.deactivated_count }} deactivated</p>
+      {% if last_sync.error %}<p class="operations-error">{{ last_sync.error|truncatechars:180 }}</p>{% endif %}
+    {% else %}
+      <p>Run the first catalog sync after configuring eBay.</p>
+    {% endif %}
+  </div>{% endif %}
+
+  {% if can_view_orders %}<div class="operations-recent">
+    <div class="operations-section-heading">
+      <h2>Recent orders</h2>
+      <a href="{% url 'admin:orders_order_changelist' %}">View all</a>
+    </div>
+    {% if recent_orders %}
+      <div class="operations-table-wrap">
+        <table>
+          <thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Total</th><th>Placed</th></tr></thead>
+          <tbody>
+            {% for order in recent_orders %}
+              <tr>
+                <th data-label="Order"><a href="{% url 'admin:orders_order_change' order.pk %}">{{ order.reference }}</a></th>
+                <td data-label="Customer">{{ order.customer_name }}</td>
+                <td data-label="Status"><span class="operations-status operations-status--{{ order.status }}">{{ order.get_status_display }}</span></td>
+                <td data-label="Total">{{ order.currency }} {{ order.total|floatformat:2 }}</td>
+                <td data-label="Placed">{{ order.created_at|date:"M j, g:i A" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="operations-empty">No orders yet.</p>
+    {% endif %}
+  </div>{% endif %}
+</section>

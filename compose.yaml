@@ -19,18 +19,22 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      EBAY_ACCOUNT_STATE_DIRECTORY: /var/lib/seller-site
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    volumes:
+      - integration_state:/var/lib/seller-site
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/health/', headers={'Host':'localhost','X-Forwarded-Proto':'https'}); urllib.request.urlopen(request, timeout=3)",
+          "import os, urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/health/', headers={'Host':os.environ['STORE_DOMAIN'],'X-Forwarded-Proto':'https'}); urllib.request.urlopen(request, timeout=3)",
         ]
       interval: 15s
       timeout: 5s
@@ -42,9 +46,13 @@ services:
     restart: unless-stopped
     command: ["worker"]
     env_file: .env
+    environment:
+      EBAY_ACCOUNT_STATE_DIRECTORY: /var/lib/seller-site
     depends_on:
       web:
         condition: service_healthy
+    volumes:
+      - integration_state:/var/lib/seller-site
     healthcheck:
       test: ["CMD", "python", "manage.py", "worker_health"]
       interval: 60s
@@ -74,3 +82,4 @@ volumes:
   postgres_data:
   caddy_data:
   caddy_config:
+  integration_state:

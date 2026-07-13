@@ -1,19 +1,64 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
 
 import httpx
 import nh3
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.validators import URLValidator
 from django.utils.dateparse import parse_datetime
+
+from .account_state import account_closure_notification_id
+from .models import EbayAccountClosure
 
 
 XML_NAMESPACE = "urn:ebay:apis:eBLBaseComponents"
 NS = {"e": XML_NAMESPACE}
 SUPPORTED_LISTING_TYPES = {"FixedPriceItem", "StoresFixedPrice"}
+ACTIVE_LISTING_STATUS = "Active"
+validate_https_url = URLValidator(schemes=("https",))
+DESCRIPTION_TAGS = {
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "caption",
+    "code",
+    "dd",
+    "del",
+    "dl",
+    "dt",
+    "em",
+    "figcaption",
+    "figure",
+    "h3",
+    "h4",
+    "hr",
+    "i",
+    "ins",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "u",
+    "ul",
+}
+DESCRIPTION_ATTRIBUTES = {"a": {"href"}}
 ElementTree.register_namespace("", XML_NAMESPACE)
 
 
@@ -61,11 +106,18 @@ class EbayListing:
     shipping: dict
     listing_url: str
     listing_type: str
+    listing_status: str
     quantity: int
     started_at: object
     ends_at: object
     images: tuple
     variations: tuple
+
+
+@dataclass(frozen=True)
+class EbayUserIdentity:
+    username: str
+    eias_token: str
 
 
 def _element(name, text=None):
@@ -115,7 +167,13 @@ def _money(parent, path):
     currency = node.attrib.get("currencyID")
     if not currency:
         raise EbayResponseError(f"eBay response is missing {path} currencyID")
-    return Decimal(node.text), currency
+    try:
+        value = Decimal(node.text)
+    except InvalidOperation as error:
+        raise EbayResponseError(f"eBay response has invalid {path} amount") from error
+    if not value.is_finite() or value < 0:
+        raise EbayResponseError(f"eBay response has invalid {path} amount")
+    return value, currency
 
 
 def _date(parent, path):
@@ -126,9 +184,14 @@ def _date(parent, path):
 
 
 def _shipping(item):
+    dispatch_time_max = _text(item, "e:DispatchTimeMax")
+    if dispatch_time_max and (
+        not dispatch_time_max.isascii() or not dispatch_time_max.isdigit()
+    ):
+        raise EbayResponseError("eBay response has invalid DispatchTimeMax")
     details = item.find("e:ShippingDetails", NS)
     if details is None:
-        return {}
+        return {"dispatch_time_max": dispatch_time_max} if dispatch_time_max else {}
     services = []
     for option in details.findall("e:ShippingServiceOptions", NS):
         cost = option.find("e:ShippingServiceCost", NS)
@@ -150,16 +213,30 @@ def _shipping(item):
         "excluded_locations": [
             node.text or "" for node in details.findall("e:ExcludeShipToLocation", NS)
         ],
-        "dispatch_time_max": _text(item, "e:DispatchTimeMax"),
+        "dispatch_time_max": dispatch_time_max,
         "location": _text(item, "e:Location"),
         "country": _text(item, "e:Country"),
         "postal_code": _text(item, "e:PostalCode"),
     }
 
 
+def _https_url(url, kind):
+    try:
+        validate_https_url(url)
+    except ValidationError as error:
+        raise EbayResponseError(
+            f"eBay response has invalid HTTPS {kind} URL"
+        ) from error
+    return url
+
+
+def _image(url, variation_name="", variation_value=""):
+    return EbayImage(_https_url(url, "image"), variation_name, variation_value)
+
+
 def _images(item):
     images = [
-        EbayImage(node.text)
+        _image(node.text)
         for node in item.findall("e:PictureDetails/e:PictureURL", NS)
         if node.text
     ]
@@ -170,15 +247,15 @@ def _images(item):
             value = _required_text(picture_set, "e:VariationSpecificValue")
             for node in picture_set.findall("e:PictureURL", NS):
                 if node.text and node.text not in seen:
-                    images.append(EbayImage(node.text, name, value))
+                    images.append(_image(node.text, name, value))
                     seen.add(node.text)
     gallery = _text(item, "e:PictureDetails/e:GalleryURL")
     if not images and gallery:
-        images.append(EbayImage(gallery))
+        images.append(_image(gallery))
     return tuple(images)
 
 
-def _variations(item, product_title):
+def _variations(item, currency):
     variations = []
     for variation in item.findall("e:Variations/e:Variation", NS):
         sku = _text(variation, "e:SKU")
@@ -189,13 +266,18 @@ def _variations(item, product_title):
         source_key = sku or (
             f"missing-{hashlib.sha256(signature.encode()).hexdigest()[:24]}"
         )
-        price, _ = _money(variation, "e:StartPrice")
+        price, variation_currency = _money(variation, "e:StartPrice")
+        if variation_currency != currency:
+            raise EbayResponseError(
+                f"eBay variation currency {variation_currency} does not match "
+                f"listing currency {currency}"
+            )
         values = [value for group in specifics.values() for value in group]
         variations.append(
             EbayVariation(
                 source_key=source_key,
                 sku=sku,
-                title=f"{product_title} - {' / '.join(values)}",
+                title=" / ".join(values)[:255],
                 specifics=specifics,
                 price=price,
                 quantity=_available_quantity(variation),
@@ -210,18 +292,30 @@ def parse_listing(response):
     if item is None:
         raise EbayResponseError("GetItem response is missing Item")
     title = _required_text(item, "e:Title")
-    variations = _variations(item, title)
+    price, currency = _money(item, "e:StartPrice")
+    variations = _variations(item, currency)
     if variations:
-        price = min(variation.price for variation in variations)
-        currency = _money(item, "e:StartPrice")[1]
+        available_prices = [
+            variation.price
+            for variation in variations
+            if variation.purchasable and variation.quantity > 0
+        ]
+        if available_prices:
+            price = min(available_prices)
         quantity = sum(variation.quantity for variation in variations)
     else:
-        price, currency = _money(item, "e:StartPrice")
         quantity = _available_quantity(item)
     return EbayListing(
         item_id=_required_text(item, "e:ItemID"),
         title=title,
-        description=nh3.clean(_text(item, "e:Description")),
+        description=nh3.clean(
+            _text(item, "e:Description"),
+            tags=DESCRIPTION_TAGS,
+            clean_content_tags={"script", "style"},
+            attributes=DESCRIPTION_ATTRIBUTES,
+            url_schemes={"https", "mailto", "tel"},
+            url_relative="deny",
+        ),
         price=price,
         currency=currency,
         condition=_text(item, "e:ConditionDisplayName"),
@@ -229,8 +323,11 @@ def parse_listing(response):
         category_name=_text(item, "e:PrimaryCategory/e:CategoryName"),
         item_specifics=_specifics(item),
         shipping=_shipping(item),
-        listing_url=_required_text(item, "e:ListingDetails/e:ViewItemURL"),
+        listing_url=_https_url(
+            _required_text(item, "e:ListingDetails/e:ViewItemURL"), "listing"
+        ),
         listing_type=_required_text(item, "e:ListingType"),
+        listing_status=_required_text(item, "e:SellingStatus/e:ListingStatus"),
         quantity=quantity,
         started_at=_date(item, "e:ListingDetails/e:StartTime"),
         ends_at=_date(item, "e:ListingDetails/e:EndTime"),
@@ -241,6 +338,7 @@ def parse_listing(response):
 
 class EbayTradingClient:
     def __init__(self, transport=None):
+        self._ensure_account_open()
         required = {
             "EBAY_CLIENT_ID": settings.EBAY_CLIENT_ID,
             "EBAY_CLIENT_SECRET": settings.EBAY_CLIENT_SECRET,
@@ -263,7 +361,13 @@ class EbayTradingClient:
     def close(self):
         self.http.close()
 
+    @staticmethod
+    def _ensure_account_open():
+        if account_closure_notification_id() or EbayAccountClosure.objects.exists():
+            raise ImproperlyConfigured("The eBay seller account is closed.")
+
     def refresh_access_token(self):
+        self._ensure_account_open()
         response = self.http.post(
             settings.EBAY_TOKEN_ENDPOINT,
             auth=(settings.EBAY_CLIENT_ID, settings.EBAY_CLIENT_SECRET),
@@ -278,6 +382,7 @@ class EbayTradingClient:
         return self.access_token
 
     def _call(self, name, request):
+        self._ensure_account_open()
         if not self.access_token:
             self.refresh_access_token()
         response = self.http.post(
@@ -315,7 +420,10 @@ class EbayTradingClient:
 
     def get_user(self):
         response = self._call("GetUser", _element("GetUserRequest"))
-        return _required_text(response, "e:User/e:UserID")
+        return EbayUserIdentity(
+            username=_required_text(response, "e:User/e:UserID"),
+            eias_token=_required_text(response, "e:User/e:EIASToken"),
+        )
 
     def out_of_stock_control_enabled(self):
         request = _element("GetUserPreferencesRequest")
@@ -324,13 +432,14 @@ class EbayTradingClient:
         return _required_text(response, "e:OutOfStockControlPreference") == "true"
 
     def verify_seller(self):
-        actual = self.get_user()
-        if actual.casefold() != settings.EBAY_SELLER_USERNAME.casefold():
+        identity = self.get_user()
+        if identity.username.casefold() != settings.EBAY_SELLER_USERNAME.casefold():
             raise EbayResponseError(
-                f"eBay token belongs to {actual}, not {settings.EBAY_SELLER_USERNAME}"
+                f"eBay token belongs to {identity.username}, not {settings.EBAY_SELLER_USERNAME}"
             )
         if not self.out_of_stock_control_enabled():
             raise EbayResponseError("eBay out-of-stock control must be enabled")
+        return identity
 
     def active_item_ids(self):
         page = 1

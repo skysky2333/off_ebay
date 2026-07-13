@@ -28,12 +28,14 @@ US_REGIONS = (
 
 class CheckoutForm(forms.Form):
     customer_email = forms.EmailField(
-        widget=forms.EmailInput(attrs={"autocomplete": "email"})
+        widget=forms.EmailInput(
+            attrs={"aria-describedby": "customer-email-help", "autocomplete": "email"}
+        )
     )
     customer_phone = forms.CharField(
         max_length=40,
         required=False,
-        widget=forms.TextInput(attrs={"autocomplete": "tel"}),
+        widget=forms.TelInput(attrs={"autocomplete": "tel"}),
     )
     customer_name = forms.CharField(
         max_length=300,
@@ -58,12 +60,12 @@ class CheckoutForm(forms.Form):
     )
     shipping_postal_code = forms.CharField(
         max_length=10,
-        validators=[RegexValidator(r"^\d{5}(?:-\d{4})?$", "Enter a valid U.S. ZIP code.")],
+        validators=[RegexValidator(r"^[0-9]{5}(?:-?[0-9]{4})?$", "Enter a valid U.S. ZIP code.")],
         widget=forms.TextInput(
             attrs={
                 "autocomplete": "postal-code",
                 "inputmode": "numeric",
-                "pattern": r"\d{5}(?:-\d{4})?",
+                "pattern": r"[0-9]{5}(?:-?[0-9]{4})?",
             }
         ),
     )
@@ -76,3 +78,7 @@ class CheckoutForm(forms.Form):
         if country != "US":
             raise forms.ValidationError("Only United States addresses are supported.")
         return country
+
+    def clean_shipping_postal_code(self):
+        postal_code = self.cleaned_data["shipping_postal_code"]
+        return f"{postal_code[:5]}-{postal_code[5:]}" if len(postal_code) == 9 else postal_code

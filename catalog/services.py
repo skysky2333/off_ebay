@@ -1,17 +1,99 @@
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Min, Q, Sum
 from django.utils import timezone
 from django.utils.text import slugify
 
-from .ebay import EbayInventoryConflict, EbayResponseError, SUPPORTED_LISTING_TYPES
+from .account_state import account_closure_notification_id, record_account_closure
+from .ebay import (
+    ACTIVE_LISTING_STATUS,
+    SUPPORTED_LISTING_TYPES,
+    EbayInventoryConflict,
+    EbayResponseError,
+    EbayUserIdentity,
+)
 from .models import (
+    EbayAccountClosure,
+    EbayAccountIdentity,
     InventoryOperation,
     Product,
     ProductImage,
     ProductVariant,
     SyncRun,
 )
+from .pricing import direct_price
+
+
+class EbayAccountIdentityUnavailable(Exception):
+    pass
+
+
+def _close_ebay_account(notification_id):
+    from orders.models import OrderItem
+    from storefront.models import StoreSettings
+
+    store = StoreSettings.objects.select_for_update().get(pk=1)
+    closure, _ = EbayAccountClosure.objects.get_or_create(
+        pk=1, defaults={"notification_id": notification_id}
+    )
+    store.checkout_enabled = False
+    store.save(update_fields=("checkout_enabled",))
+    InventoryOperation.objects.all().delete()
+    SyncRun.objects.all().delete()
+    Product.objects.all().delete()
+    EbayAccountIdentity.objects.all().delete()
+    OrderItem.objects.update(ebay_item_id="", variation_sku="", image_url="")
+    return closure
+
+
+@transaction.atomic
+def process_ebay_account_closure(notification_id, username, user_id, eias_token):
+    existing = EbayAccountClosure.objects.filter(pk=1).first()
+    if existing:
+        record_account_closure(existing.notification_id)
+        return existing
+    from storefront.models import StoreSettings
+
+    StoreSettings.objects.select_for_update().get(pk=1)
+    identity = EbayAccountIdentity.objects.select_for_update().filter(pk=1).first()
+    known_usernames = {settings.EBAY_SELLER_USERNAME.casefold()}
+    if identity:
+        known_usernames.add(identity.username.casefold())
+    matches_username = (
+        username.casefold() in known_usernames
+        or user_id.casefold() in known_usernames
+    )
+    if not identity and not matches_username:
+        from orders.models import OrderItem
+
+        if (
+            settings.EBAY_REFRESH_TOKEN
+            or Product.objects.exists()
+            or SyncRun.objects.exists()
+            or OrderItem.objects.exclude(ebay_item_id="").exists()
+        ):
+            raise EbayAccountIdentityUnavailable(
+                "Stable eBay seller identity has not been recorded."
+            )
+        return None
+    if (
+        not matches_username
+        and (not identity or eias_token != identity.eias_token)
+    ):
+        return None
+    record_account_closure(notification_id)
+    return _close_ebay_account(notification_id)
+
+
+@transaction.atomic
+def enforce_recorded_ebay_account_closure():
+    notification_id = account_closure_notification_id()
+    if not notification_id:
+        closure = EbayAccountClosure.objects.filter(pk=1).first()
+        if closure:
+            notification_id = closure.notification_id
+            record_account_closure(notification_id)
+    return _close_ebay_account(notification_id) if notification_id else None
 
 
 class SyncRunTracker:
@@ -23,10 +105,11 @@ class SyncRunTracker:
 
     def __exit__(self, exception_type, exception, traceback):
         if exception is not None:
-            self.run.status = SyncRun.Status.FAILED
-            self.run.error = str(exception)
-            self.run.completed_at = timezone.now()
-            self.run.save(update_fields=("status", "error", "completed_at"))
+            SyncRun.objects.filter(pk=self.run.pk).update(
+                status=SyncRun.Status.FAILED,
+                error=str(exception),
+                completed_at=timezone.now(),
+            )
         return False
 
 
@@ -34,7 +117,7 @@ def _slug(listing):
     return f"{slugify(listing.title)[:200]}-{listing.item_id}"
 
 
-def _sync_variants(product, listing, preserve_inventory):
+def _sync_variants(product, listing):
     source_keys = []
     for variation in listing.variations:
         source_keys.append(variation.source_key)
@@ -56,13 +139,20 @@ def _sync_variants(product, listing, preserve_inventory):
             variant.title = variation.title
             variant.specifics = variation.specifics
             variant.price = variation.price
+            variant.quantity = variation.quantity
             variant.active = True
             variant.purchasable = variation.purchasable
-            fields = ["sku", "title", "specifics", "price", "active", "purchasable"]
-            if not preserve_inventory:
-                variant.quantity = variation.quantity
-                fields.append("quantity")
-            variant.save(update_fields=fields)
+            variant.save(
+                update_fields=(
+                    "sku",
+                    "title",
+                    "specifics",
+                    "price",
+                    "quantity",
+                    "active",
+                    "purchasable",
+                )
+            )
     product.variants.exclude(source_key__in=source_keys).update(
         active=False, quantity=0
     )
@@ -84,7 +174,7 @@ def _sync_images(product, listing):
     )
 
 
-def _sync_listing(listing, observed_at):
+def sync_listing(listing, observed_at):
     defaults = {
         "title": listing.title,
         "description": listing.description,
@@ -113,23 +203,61 @@ def _sync_listing(listing, observed_at):
         },
     )
     if not created:
-        preserve_inventory = product.last_synced_at > observed_at
-        if preserve_inventory:
-            defaults.pop("quantity")
-            defaults.pop("last_synced_at")
+        if product.last_synced_at > observed_at:
+            return
         for field, value in defaults.items():
             setattr(product, field, value)
         product.save(update_fields=(*defaults.keys(), "updated_at"))
-    else:
-        preserve_inventory = False
-    _sync_variants(product, listing, preserve_inventory)
+    _sync_variants(product, listing)
     _sync_images(product, listing)
 
 
+def sync_unavailable_listing(product, listing, observed_at):
+    if listing.listing_status == ACTIVE_LISTING_STATUS:
+        sync_listing(listing, observed_at)
+        return
+    ProductVariant.objects.filter(product=product).update(active=False, quantity=0)
+    Product.objects.filter(pk=product.pk).update(
+        active=False, quantity=0, last_synced_at=observed_at
+    )
+
+
+def complete_unavailable_release(operation, created, product, listing):
+    now = timezone.now()
+    sync_unavailable_listing(product, listing, now)
+    if created:
+        operation.delete()
+        return
+    operation.status = InventoryOperation.Status.SUCCEEDED
+    operation.completed_at = now
+    operation.save(update_fields=("status", "completed_at"))
+
+
 def sync_catalog(client):
+    if account_closure_notification_id() or EbayAccountClosure.objects.exists():
+        raise EbayResponseError("The eBay seller account is closed.")
     run = SyncRun.objects.create(seller_username=settings.EBAY_SELLER_USERNAME)
     with SyncRunTracker(run):
-        client.verify_seller()
+        identity = client.verify_seller()
+        if not isinstance(identity, EbayUserIdentity):
+            raise EbayResponseError("eBay seller verification returned invalid identity")
+        from storefront.models import StoreSettings
+
+        account_closed = False
+        with transaction.atomic():
+            StoreSettings.objects.select_for_update().get(pk=1)
+            account_closed = EbayAccountClosure.objects.exists()
+            if not account_closed:
+                EbayAccountIdentity.objects.update_or_create(
+                    pk=1,
+                    defaults={
+                        "username": identity.username,
+                        "eias_token": identity.eias_token,
+                    },
+                )
+        if account_closed:
+            SyncRun.objects.filter(pk=run.pk).delete()
+            raise EbayResponseError("The eBay seller account is closed.")
         item_ids = client.active_item_ids()
         if len(item_ids) != len(set(item_ids)):
             raise EbayResponseError("GetMyeBaySelling returned duplicate item IDs")
@@ -146,35 +274,43 @@ def sync_catalog(client):
             entry
             for entry in hydrated
             if entry[0].listing_type in SUPPORTED_LISTING_TYPES
+            and entry[0].listing_status == ACTIVE_LISTING_STATUS
         ]
         synced_at = timezone.now()
+        account_closed = False
         with transaction.atomic():
-            list(Product.objects.select_for_update().values_list("pk", flat=True))
-            for listing, observed_at in supported:
-                _sync_listing(listing, observed_at)
-            active_ids = [listing.item_id for listing, _ in supported]
-            stale = Product.objects.filter(active=True).exclude(
-                ebay_item_id__in=active_ids
-            )
-            deactivated_count = stale.count()
-            ProductVariant.objects.filter(product__in=stale).update(
-                active=False, quantity=0
-            )
-            stale.update(active=False, quantity=0, last_synced_at=synced_at)
-        run.status = SyncRun.Status.SUCCEEDED
-        run.indexed_count = len(item_ids)
-        run.imported_count = len(supported)
-        run.deactivated_count = deactivated_count
-        run.completed_at = timezone.now()
-        run.save(
-            update_fields=(
-                "status",
-                "indexed_count",
-                "imported_count",
-                "deactivated_count",
-                "completed_at",
-            )
-        )
+            StoreSettings.objects.select_for_update().get(pk=1)
+            account_closed = EbayAccountClosure.objects.exists()
+            if not account_closed:
+                list(Product.objects.select_for_update().values_list("pk", flat=True))
+                for listing, observed_at in supported:
+                    sync_listing(listing, observed_at)
+                active_ids = [listing.item_id for listing, _ in supported]
+                stale = Product.objects.filter(
+                    active=True, last_synced_at__lt=run.started_at
+                ).exclude(ebay_item_id__in=active_ids)
+                deactivated_count = stale.count()
+                ProductVariant.objects.filter(product__in=stale).update(
+                    active=False, quantity=0
+                )
+                stale.update(active=False, quantity=0, last_synced_at=synced_at)
+                run.status = SyncRun.Status.SUCCEEDED
+                run.indexed_count = len(item_ids)
+                run.imported_count = len(supported)
+                run.deactivated_count = deactivated_count
+                run.completed_at = timezone.now()
+                run.save(
+                    update_fields=(
+                        "status",
+                        "indexed_count",
+                        "imported_count",
+                        "deactivated_count",
+                        "completed_at",
+                    )
+                )
+        if account_closed:
+            SyncRun.objects.filter(pk=run.pk).delete()
+            raise EbayResponseError("The eBay seller account is closed.")
     return run
 
 
@@ -187,7 +323,11 @@ def set_inventory_quantity(
     reason,
     idempotency_key,
     variant=None,
+    expected_currency=None,
+    expected_price=None,
 ):
+    if (expected_currency is None) != (expected_price is None):
+        raise ValueError("Expected currency and price must be provided together")
     if variant is not None and variant.product_id != product.id:
         raise ValueError("Variant does not belong to product")
     if variant is not None and not variant.sku:
@@ -225,6 +365,7 @@ def set_inventory_quantity(
     if not created and operation.status == InventoryOperation.Status.FAILED:
         raise EbayInventoryConflict(operation.error)
     conflict = ""
+    quote_changed = ""
     with transaction.atomic():
         product = Product.objects.select_for_update().get(pk=product.pk)
         if variant is not None:
@@ -234,34 +375,96 @@ def set_inventory_quantity(
             raise EbayResponseError(
                 f"GetItem returned {listing.item_id} for {product.ebay_item_id}"
             )
-        if variant is None:
+        if (
+            reason == InventoryOperation.Reason.RELEASE
+            and listing.listing_status != ACTIVE_LISTING_STATUS
+        ):
+            complete_unavailable_release(operation, created, product, listing)
+            return None
+        listing_inactive = listing.listing_status != ACTIVE_LISTING_STATUS
+        if listing_inactive:
+            sync_unavailable_listing(product, listing, timezone.now())
+            listing_variant = None
+            current_quantity = None
+            current_price = None
+        elif variant is None:
+            listing_variant = None
             current_quantity = listing.quantity
+            current_price = (
+                direct_price(listing.price) if expected_price is not None else None
+            )
         else:
+            listing_variant = None
             matches = [item for item in listing.variations if item.sku == variant.sku]
+            if reason == InventoryOperation.Reason.RELEASE and not matches:
+                complete_unavailable_release(operation, created, product, listing)
+                return None
             if len(matches) != 1:
-                raise EbayResponseError(
-                    f"GetItem did not return variation SKU {variant.sku}"
+                if not created or expected_price is None:
+                    raise EbayResponseError(
+                        f"GetItem did not return variation SKU {variant.sku}"
+                    )
+                current_quantity = None
+                current_price = None
+            else:
+                listing_variant = matches[0]
+                current_quantity = listing_variant.quantity
+                current_price = (
+                    direct_price(listing_variant.price)
+                    if expected_price is not None
+                    else None
                 )
-            current_quantity = matches[0].quantity
-        if current_quantity == expected_quantity:
+        quote_mismatch = listing_inactive or (
+            expected_price is not None
+            and (
+                bool(listing.variations) != bool(variant)
+                or listing.currency != expected_currency
+                or current_price != expected_price
+            )
+        )
+        if not created and current_quantity == quantity:
+            if quote_mismatch:
+                sync_listing(listing, timezone.now())
+            verified = quantity
+        elif quote_mismatch and (created or current_quantity == expected_quantity):
+            if not listing_inactive:
+                sync_listing(listing, timezone.now())
+            operation.delete()
+            quote_changed = (
+                f"{product.title} is no longer available."
+                if listing_inactive
+                else (
+                    f"The price for {product.title} changed. "
+                    "Refresh your cart and review the updated total."
+                )
+            )
+        elif current_quantity == expected_quantity:
             verified = client.revise_inventory_status(
                 product.ebay_item_id,
                 quantity,
                 idempotency_key,
                 variant.sku if variant else "",
             )
-        elif not created and current_quantity == quantity:
-            verified = quantity
         else:
             conflict = (
-                f"Inventory mismatch: expected {expected_quantity}, found {current_quantity}"
+                f"{product.title} is no longer available."
+                if listing_inactive
+                else (
+                    f"Inventory mismatch: expected {expected_quantity}, "
+                    f"found {current_quantity}"
+                )
             )
-            operation.status = InventoryOperation.Status.FAILED
-            operation.error = conflict
-            operation.completed_at = timezone.now()
-            operation.save(update_fields=("status", "error", "completed_at"))
+            if created and reason == InventoryOperation.Reason.RELEASE:
+                operation.delete()
+            else:
+                operation.status = InventoryOperation.Status.FAILED
+                operation.error = conflict
+                operation.completed_at = timezone.now()
+                operation.save(update_fields=("status", "error", "completed_at"))
             verified = None
-        if conflict:
+        if quote_changed:
+            return_operation = None
+        elif conflict:
             return_operation = operation
         elif variant is None:
             Product.objects.filter(pk=product.pk).update(
@@ -269,13 +472,23 @@ def set_inventory_quantity(
             )
         else:
             ProductVariant.objects.filter(pk=variant.pk).update(quantity=verified)
-            total = ProductVariant.objects.filter(
+            inventory = ProductVariant.objects.filter(
                 product=product, active=True
-            ).aggregate(total=Sum("quantity"))["total"] or 0
-            Product.objects.filter(pk=product.pk).update(
-                quantity=total, last_synced_at=timezone.now()
+            ).aggregate(
+                total=Sum("quantity"),
+                price=Min(
+                    "price",
+                    filter=Q(purchasable=True, quantity__gt=0),
+                ),
             )
-        if not conflict:
+            product_updates = {
+                "quantity": inventory["total"] or 0,
+                "last_synced_at": timezone.now(),
+            }
+            if inventory["price"] is not None:
+                product_updates["price"] = inventory["price"]
+            Product.objects.filter(pk=product.pk).update(**product_updates)
+        if not conflict and not quote_changed:
             operation.status = InventoryOperation.Status.SUCCEEDED
             operation.verified_quantity = verified
             operation.completed_at = timezone.now()
@@ -283,6 +496,8 @@ def set_inventory_quantity(
                 update_fields=("status", "verified_quantity", "completed_at")
             )
             return_operation = operation
+    if quote_changed:
+        raise EbayInventoryConflict(quote_changed)
     if conflict:
         raise EbayInventoryConflict(conflict)
     return return_operation

@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -12,6 +13,7 @@ ALLOWED_HOSTS = [host for host in os.environ["DJANGO_ALLOWED_HOSTS"].split(",") 
 CSRF_TRUSTED_ORIGINS = [
     origin for origin in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if origin
 ]
+CSRF_FAILURE_VIEW = "storefront.views.csrf_failure"
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -58,6 +60,29 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "request_exception": {"format": "{levelname} {name}", "style": "{"},
+    },
+    "handlers": {
+        "request_exception": {
+            "class": "logging.StreamHandler",
+            "formatter": "request_exception",
+            "level": "ERROR",
+            "stream": "ext://sys.stderr",
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["request_exception"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
+
 database_value = os.environ.get("DATABASE_URL", "")
 postgres_values = {
     name: os.environ.get(name, "")
@@ -81,10 +106,18 @@ if database_url and database_url.scheme in {"postgres", "postgresql"}:
         }
     }
 elif database_url and database_url.scheme == "sqlite":
+    sqlite_path = unquote(database_url.path)
+    if sqlite_path.startswith("//"):
+        sqlite_name = Path(sqlite_path[1:])
+    else:
+        relative_path = sqlite_path.lstrip("/")
+        sqlite_name = (
+            relative_path if relative_path == ":memory:" else BASE_DIR / relative_path
+        )
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": database_url.path,
+            "NAME": sqlite_name,
         }
     }
 elif all(postgres_values.values()):
@@ -145,8 +178,10 @@ SECURE_HSTS_PRELOAD = not DEBUG
 SECURE_SSL_REDIRECT = not DEBUG
 X_FRAME_OPTIONS = "DENY"
 
-STORE_NAME = os.environ.get("STORE_NAME", "FM2K")
+STORE_NAME = os.environ.get("STORE_NAME", "Off-Ebay")
+DIRECT_DISCOUNT_PERCENT = Decimal(os.environ.get("DIRECT_DISCOUNT_PERCENT", "10"))
 SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "")
+STORE_DOMAIN = os.environ.get("STORE_DOMAIN", "")
 
 EBAY_TRADING_ENDPOINT = os.environ.get(
     "EBAY_TRADING_ENDPOINT", "https://api.ebay.com/ws/api.dll"
@@ -154,13 +189,25 @@ EBAY_TRADING_ENDPOINT = os.environ.get(
 EBAY_TOKEN_ENDPOINT = os.environ.get(
     "EBAY_TOKEN_ENDPOINT", "https://api.ebay.com/identity/v1/oauth2/token"
 )
+EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT = os.environ.get(
+    "EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT",
+    "https://api.ebay.com/commerce/notification/v1/public_key",
+)
 EBAY_CLIENT_ID = os.environ.get("EBAY_CLIENT_ID", "")
 EBAY_CLIENT_SECRET = os.environ.get("EBAY_CLIENT_SECRET", "")
 EBAY_REFRESH_TOKEN = os.environ.get("EBAY_REFRESH_TOKEN", "")
 EBAY_COMPATIBILITY_LEVEL = os.environ.get("EBAY_COMPATIBILITY_LEVEL", "")
-EBAY_SELLER_USERNAME = os.environ.get("EBAY_SELLER_USERNAME", "fm2k244")
+EBAY_SELLER_USERNAME = os.environ.get("EBAY_SELLER_USERNAME", "")
+EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN = os.environ.get(
+    "EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN", ""
+)
+EBAY_ACCOUNT_STATE_DIRECTORY = Path(
+    os.environ.get(
+        "EBAY_ACCOUNT_STATE_DIRECTORY", BASE_DIR / ".local" / "integration-state"
+    )
+)
 EBAY_CHECKOUT_EXCLUDED_ITEMS = set(
-    filter(None, os.environ.get("EBAY_CHECKOUT_EXCLUDED_ITEMS", "800102146771").split(","))
+    filter(None, os.environ.get("EBAY_CHECKOUT_EXCLUDED_ITEMS", "").split(","))
 )
 
 PAYPAL_API_BASE_URL = os.environ.get("PAYPAL_API_BASE_URL", "https://api-m.paypal.com")

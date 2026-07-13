@@ -1,21 +1,33 @@
 from django.db import transaction
 from django.db.models import Sum
+from django.utils import timezone
 
 from orders.inventory import InventoryUnavailable
 from orders.models import InventoryReservation
 
-from .ebay import EbayTradingClient
+from .ebay import ACTIVE_LISTING_STATUS, EbayResponseError, EbayTradingClient
 from .models import InventoryOperation, Product, ProductVariant
-from .services import set_inventory_quantity
+from .pricing import direct_price
+from .services import set_inventory_quantity, sync_listing, sync_unavailable_listing
+
+
+def _listing_variant(listing, variant):
+    matches = [item for item in listing.variations if item.sku == variant.sku]
+    if len(matches) != 1:
+        raise InventoryUnavailable(f"eBay no longer has variation SKU {variant.sku}.")
+    return matches[0]
 
 
 def _listing_quantity(listing, variant):
     if variant is None:
         return listing.quantity
-    matches = [item for item in listing.variations if item.sku == variant.sku]
-    if len(matches) != 1:
-        raise InventoryUnavailable(f"eBay no longer has variation SKU {variant.sku}.")
-    return matches[0].quantity
+    return _listing_variant(listing, variant).quantity
+
+
+def _listing_price(listing, variant):
+    if variant is None:
+        return listing.price
+    return _listing_variant(listing, variant).price
 
 
 class EbayInventoryGateway:
@@ -60,25 +72,56 @@ class EbayInventoryGateway:
             available = product.quantity
             reservations = reservations.filter(order_item__variant__isnull=True)
 
-        reserved = reservations.aggregate(total=Sum("quantity"))["total"] or 0
-        if reserved > available:
-            raise InventoryUnavailable(f"Only {available} of {item.title} remain.")
+        reserved_elsewhere = (
+            reservations.exclude(pk=reservation.pk).aggregate(total=Sum("quantity"))[
+                "total"
+            ]
+            or 0
+        )
+        if reserved_elsewhere + reservation.quantity > available:
+            remaining = max(available - reserved_elsewhere, 0)
+            raise InventoryUnavailable(f"Only {remaining} of {item.title} remain.")
 
     def commit(self, reservation):
         reservation = InventoryReservation.objects.select_related(
-            "order_item__product", "order_item__variant"
+            "order_item__order", "order_item__product", "order_item__variant"
         ).get(pk=reservation.pk)
         item = reservation.order_item
         if item.product is None or (item.variation_sku and item.variant is None):
             raise InventoryUnavailable("The catalog source for this item is unavailable.")
         key = f"sale-{reservation.pk}"
         operation = InventoryOperation.objects.filter(idempotency_key=key).first()
+        if operation is None and not Product.objects.filter(
+            pk=item.product_id, active=True, checkout_excluded=False
+        ).exists():
+            raise InventoryUnavailable(f"{item.title} is no longer available.")
         with EbayTradingClient() as client:
             if operation:
                 expected = operation.expected_quantity
                 target = operation.requested_quantity
             else:
                 listing = client.get_item(item.ebay_item_id)
+                if (
+                    listing.item_id != item.ebay_item_id
+                    or listing.listing_status != ACTIVE_LISTING_STATUS
+                ):
+                    raise InventoryUnavailable(f"{item.title} is no longer available.")
+                if bool(listing.variations) != bool(item.variant):
+                    sync_listing(listing, timezone.now())
+                    raise InventoryUnavailable(
+                        f"The options for {item.title} changed. Refresh your cart and review it again."
+                    )
+                if item.variant and item.variant.sku != item.variation_sku:
+                    raise InventoryUnavailable(f"{item.title} is no longer available.")
+                if (
+                    listing.currency != item.order.currency
+                    or direct_price(_listing_price(listing, item.variant))
+                    != item.unit_price
+                ):
+                    sync_listing(listing, timezone.now())
+                    raise InventoryUnavailable(
+                        f"The price for {item.title} changed. Refresh your cart and review the updated total."
+                    )
                 expected = _listing_quantity(listing, item.variant)
                 if expected < reservation.quantity:
                     raise InventoryUnavailable(f"{item.title} is no longer available.")
@@ -95,6 +138,8 @@ class EbayInventoryGateway:
                 quantity=target,
                 reason=InventoryOperation.Reason.SALE,
                 idempotency_key=key,
+                expected_currency=item.order.currency,
+                expected_price=item.unit_price,
             )
 
     def release(self, reservation):
@@ -121,6 +166,17 @@ class EbayInventoryGateway:
                 target = operation.requested_quantity
             else:
                 listing = client.get_item(item.ebay_item_id)
+                if listing.item_id != item.ebay_item_id:
+                    raise EbayResponseError(
+                        f"GetItem returned {listing.item_id} for {item.ebay_item_id}"
+                    )
+                variant_missing = item.variant and not any(
+                    candidate.sku == item.variant.sku
+                    for candidate in listing.variations
+                )
+                if listing.listing_status != ACTIVE_LISTING_STATUS or variant_missing:
+                    sync_unavailable_listing(item.product, listing, timezone.now())
+                    return
                 expected = _listing_quantity(listing, item.variant)
                 target = expected + reservation.quantity
                 operation = InventoryOperation.objects.filter(idempotency_key=key).first()

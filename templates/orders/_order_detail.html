@@ -5,7 +5,8 @@
       {% for item in order.items.all %}
         <article class="line-item">
           <div class="line-item__image">
-            {% if item.image_url %}<img src="{{ item.image_url }}" alt="{{ item.title }}" decoding="async">{% endif %}
+            <span class="image-placeholder" aria-hidden="true">No image</span>
+            {% if item.image_url %}<img src="{{ item.image_url }}" alt="" decoding="async" onerror="this.hidden=true">{% endif %}
           </div>
           <div class="line-item__content">
             <h3>{{ item.title }}</h3>
@@ -18,12 +19,22 @@
     </div>
   </section>
 
-  <aside>
+  <aside aria-label="Order details">
     <dl class="order-facts">
       <div class="order-fact">
-        <dt>Total</dt>
+        <dt>{% if order.refunded_total %}Original total{% else %}Total{% endif %}</dt>
         <dd>${{ order.total|floatformat:2 }} {{ order.currency }}</dd>
       </div>
+      {% if order.refunded_total %}
+        <div class="order-fact">
+          <dt>Refunded</dt>
+          <dd>-${{ order.refunded_total|floatformat:2 }} {{ order.currency }}</dd>
+        </div>
+        <div class="order-fact">
+          <dt>Remaining paid</dt>
+          <dd>${{ order.remaining_paid|floatformat:2 }} {{ order.currency }}</dd>
+        </div>
+      {% endif %}
       <div class="order-fact">
         <dt>Shipping to</dt>
         <dd>
@@ -35,13 +46,15 @@
           </address>
         </dd>
       </div>
-      {% if order.shipments.all %}
-        {% for shipment in order.shipments.all %}
+      {% if shipments %}
+        {% for shipment in shipments %}
           <div class="order-fact">
-            <dt>{{ shipment.carrier }} tracking</dt>
+            <dt>{% if shipment.tracking_number %}{{ shipment.carrier }} tracking{% else %}Delivery status{% endif %}</dt>
             <dd>
-              {% if shipment.tracking_url %}<a class="tracking-link" href="{{ shipment.tracking_url }}" rel="noreferrer">{{ shipment.tracking_number }}</a>{% else %}{{ shipment.tracking_number }}{% endif %}
-              <br><span class="muted">{{ shipment.get_status_display }}</span>
+              {% if shipment.tracking_number %}
+                {% if shipment.tracking_url %}<a class="tracking-link" href="{{ shipment.tracking_url }}" rel="noreferrer">{{ shipment.tracking_number }}</a>{% else %}{{ shipment.tracking_number }}{% endif %}<br>
+              {% endif %}
+              <span class="muted">{{ shipment.get_status_display }}</span>
             </dd>
           </div>
         {% endfor %}

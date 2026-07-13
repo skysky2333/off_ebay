@@ -17,6 +17,7 @@ class Order(models.Model):
         AWAITING_PAYMENT = "awaiting_payment", "Awaiting payment"
         PAYMENT_PROCESSING = "payment_processing", "Processing payment"
         CAPTURE_PENDING = "capture_pending", "Confirming payment"
+        FUNDING_RETRY = "funding_retry", "Payment method needed"
         PAID = "paid", "Paid"
         FULFILLING = "fulfilling", "Fulfilling"
         SHIPPED = "shipped", "Shipped"
@@ -68,6 +69,7 @@ class Order(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+        permissions = (("refund_order", "Can refund orders through PayPal"),)
         constraints = [
             models.CheckConstraint(
                 condition=Q(subtotal__gte=0), name="order_subtotal_nonnegative"
@@ -89,6 +91,10 @@ class Order(models.Model):
 
     def __str__(self):
         return self.reference
+
+    @property
+    def remaining_paid(self):
+        return self.total - self.refunded_total
 
 
 class OrderItem(models.Model):
@@ -199,12 +205,18 @@ class Shipment(models.Model):
         PAYPAL = "paypal", "PayPal"
 
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="shipments")
-    carrier = models.CharField(max_length=80)
+    carrier = models.CharField(max_length=80, blank=True)
     tracking_number = models.CharField(max_length=120)
     status = models.CharField(max_length=16, choices=Status, default=Status.SHIPPED)
     source = models.CharField(max_length=10, choices=Source, default=Source.MANUAL)
     shipped_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
+    provider_updated_at = models.DateTimeField(null=True, blank=True)
+    completes_order = models.BooleanField(
+        default=True,
+        verbose_name="Final shipment",
+        help_text="Check this only when no more packages are expected for the order.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -212,16 +224,34 @@ class Shipment(models.Model):
         ordering = ("-created_at",)
         constraints = [
             models.UniqueConstraint(
-                fields=("order", "carrier", "tracking_number"),
+                fields=("order", "tracking_number"),
                 name="unique_order_tracking_number",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(tracking_number="") | ~Q(carrier=""),
+                name="shipment_tracking_requires_carrier",
+            ),
         ]
 
     def __str__(self):
-        return f"{self.order.reference}: {self.tracking_number}"
+        return f"{self.order.reference}: {self.tracking_number or self.get_status_display()}"
+
+    def clean(self):
+        carrier = self.carrier.strip()
+        tracking_number = self.tracking_number.strip()
+        if self.carrier and not carrier:
+            raise ValidationError({"carrier": "Enter a valid carrier."})
+        if self.tracking_number and not tracking_number:
+            raise ValidationError({"tracking_number": "Enter a valid tracking number."})
+        if tracking_number and not carrier:
+            raise ValidationError(
+                {"carrier": "Enter a carrier when a tracking number is provided."}
+            )
 
     @property
     def tracking_url(self):
+        if not self.tracking_number:
+            return ""
         carrier = self.carrier.casefold()
         number = quote_plus(self.tracking_number)
         if "usps" in carrier:
@@ -234,10 +264,20 @@ class Shipment(models.Model):
 
 
 class Refund(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="refunds")
     paypal_refund_id = models.CharField(max_length=64, unique=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(
+        max_length=10, choices=Status, default=Status.COMPLETED
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("created_at",)

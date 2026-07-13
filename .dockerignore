@@ -1,4 +1,5 @@
 .conda
+.local
 .env
 .env.local
 .git

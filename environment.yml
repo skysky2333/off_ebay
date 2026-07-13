@@ -4,6 +4,7 @@ channels:
 dependencies:
   - python=3.14.6
   - django=5.2.15
+  - cryptography=45.0.7
   - gunicorn=23.0.0
   - httpx=0.28.1
   - nh3=0.3.6

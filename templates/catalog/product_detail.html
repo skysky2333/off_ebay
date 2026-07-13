@@ -13,26 +13,34 @@
     <article>
       <div class="product-detail">
         <div class="gallery{% if images|length < 2 %} gallery--single{% endif %}" data-gallery>
+          {% with primary_image=images.first %}
+            <div class="gallery__stage">
+              <span class="image-placeholder" aria-hidden="true">Image unavailable</span>
+              {% if primary_image %}
+                <a class="gallery__stage-link" href="{{ primary_image.url }}" aria-label="Open full-size image 1" data-gallery-link>
+                  <img src="{{ primary_image.url }}" alt="{{ product.title }}, image 1" data-gallery-image onerror="this.parentElement.hidden=true">
+                </a>
+              {% endif %}
+            </div>
+          {% endwith %}
           {% if images|length > 1 %}
-            <div class="gallery__thumbs" aria-label="Product images">
+            <div class="gallery__thumbs" role="group" aria-label="Product images">
               {% for image in images %}
-                <button class="gallery__thumb" type="button" data-gallery-thumb data-image-src="{{ image.url }}" data-image-alt="{{ product.title }}, image {{ forloop.counter }}" aria-label="Show image {{ forloop.counter }}" aria-current="{% if forloop.first %}true{% else %}false{% endif %}">
-                  <img src="{{ image.url }}" alt="" loading="lazy" decoding="async">
-                </button>
+                <a class="gallery__thumb" href="{{ image.url }}" data-gallery-thumb data-image-src="{{ image.url }}" data-image-alt="{{ product.title }}, image {{ forloop.counter }}" data-image-label="Open full-size image {{ forloop.counter }}" aria-label="Show image {{ forloop.counter }}" aria-current="{% if forloop.first %}true{% else %}false{% endif %}">
+                  <img src="{{ image.url }}" alt="" loading="lazy" decoding="async" onerror="this.hidden=true">
+                </a>
               {% endfor %}
             </div>
           {% endif %}
-          {% with primary_image=images.first %}
-            <div class="gallery__stage">
-              {% if primary_image %}<img src="{{ primary_image.url }}" alt="{{ product.title }}, image 1" data-gallery-image>{% endif %}
-            </div>
-          {% endwith %}
         </div>
 
         <div class="product-info">
           {% if product.condition %}<p class="eyebrow">{{ product.condition }}</p>{% endif %}
           <h1>{{ product.title }}</h1>
-          <p class="product-info__price price"><span data-price-prefix>{% if variants %}From {% endif %}</span>$<span data-product-price>{{ product.price|floatformat:2 }}</span></p>
+          <div class="price-comparison product-info__prices" aria-live="polite" aria-atomic="true">
+            <p class="product-info__price price"><span data-price-prefix>{% if variants %}From {% endif %}</span><span class="price-label">Direct</span> $<span data-product-price>{{ product.display_direct_price|floatformat:2 }}</span></p>
+            <p class="ebay-price"><span class="price-label">eBay</span> <s>$<span data-ebay-price>{{ product.display_price|floatformat:2 }}</span></s></p>
+          </div>
           <p class="product-info__availability">
             {% if product.available_quantity == 1 %}Only one available{% else %}{{ product.available_quantity }} available{% endif %}
           </p>
@@ -46,7 +54,7 @@
                   <select id="product-variant" name="variant_id" data-variant-selector required>
                     <option value="">Choose an option</option>
                     {% for variant in variants %}
-                      <option value="{{ variant.id }}" data-price="{{ variant.price|floatformat:2 }}" data-quantity="{{ variant.quantity }}">{{ variant.title }} &mdash; ${{ variant.price|floatformat:2 }} ({{ variant.quantity }} available)</option>
+                      <option value="{{ variant.id }}" data-direct-price="{{ variant.direct_price|floatformat:2 }}" data-ebay-price="{{ variant.price|floatformat:2 }}" data-quantity="{{ variant.available_quantity }}">{{ variant.title }} &mdash; ${{ variant.direct_price|floatformat:2 }} direct, eBay ${{ variant.price|floatformat:2 }} ({{ variant.available_quantity }} available)</option>
                     {% endfor %}
                   </select>
                 </div>
@@ -54,15 +62,16 @@
               <div class="quantity-row">
                 <div class="field">
                   <label for="product-quantity">Quantity</label>
-                  <input id="product-quantity" type="number" name="quantity" value="1" min="1" max="{% if variants %}1{% else %}{{ product.available_quantity }}{% endif %}" inputmode="numeric" data-product-quantity required>
+                  <input id="product-quantity" type="number" name="quantity" value="1" min="1" max="{% if variants %}{{ variant_max_quantity }}{% else %}{{ product.available_quantity }}{% endif %}" inputmode="numeric" data-product-quantity required>
                 </div>
                 <button class="button button--accent" type="submit">Add to cart</button>
               </div>
               <p class="policy-note">Ships within the United States. All sales are final.</p>
             </form>
           {% else %}
-            <div class="paypal-message" role="status">Checkout is temporarily unavailable.</div>
+            <div class="paypal-message" role="status">Ordering is currently paused.</div>
           {% endif %}
+          <a class="ebay-link ebay-link--detail" href="{{ product.listing_url }}">Prefer eBay? View this item on eBay</a>
         </div>
       </div>
 
@@ -91,6 +100,13 @@
         <section class="product-section" aria-labelledby="shipping-heading">
           <h2 id="shipping-heading">Shipping</h2>
           <div>
+            {% with dispatch_days=product.shipping.dispatch_time_max %}
+              {% if dispatch_days == "0" %}
+                <p class="muted">Ships the same business day.</p>
+              {% elif dispatch_days %}
+                <p class="muted">Ships within {{ dispatch_days }} business day{{ dispatch_days|pluralize }}.</p>
+              {% endif %}
+            {% endwith %}
             <p class="muted">United States shipping only. The final flat shipping amount is shown in your cart before checkout.</p>
             <p class="muted">Tracking will appear on your private order status page after shipment.</p>
           </div>

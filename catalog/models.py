@@ -1,17 +1,105 @@
 from django.db import models
-from django.db.models import Q, Sum
+from django.db.models import Exists, F, OuterRef, Q, Sum, Value
+from django.db.models.functions import Coalesce
+
+from .pricing import direct_price as calculate_direct_price
+
+
+HELD_RESERVATION_STATUSES = ("reserved", "committing")
+RECOVERABLE_RESERVATION_STATUSES = (*HELD_RESERVATION_STATUSES, "committed")
+
+
+class EbayAccountClosure(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    notification_id = models.CharField(max_length=128, unique=True)
+    closed_at = models.DateTimeField(auto_now_add=True)
+
+
+class EbayAccountIdentity(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    username = models.CharField(max_length=100)
+    eias_token = models.CharField(max_length=256)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class EbayPublicKeyLookupBudget(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    window = models.PositiveBigIntegerField(default=0)
+    count = models.PositiveIntegerField(default=0)
+
+
+class ProductVariantQuerySet(models.QuerySet):
+    def with_availability(self, exclude_order_id=None, restore_order_id=None):
+        held = Q(
+            order_items__reservation__status__in=HELD_RESERVATION_STATUSES
+        )
+        if exclude_order_id:
+            held &= ~Q(order_items__order_id=exclude_order_id)
+        annotations = {
+            "_held_quantity": Coalesce(
+                Sum("order_items__reservation__quantity", filter=held), Value(0)
+            )
+        }
+        if restore_order_id:
+            annotations["_owned_checkout_quantity"] = Coalesce(
+                Sum(
+                    "order_items__reservation__quantity",
+                    filter=Q(
+                        order_items__order_id=restore_order_id,
+                        order_items__reservation__status__in=RECOVERABLE_RESERVATION_STATUSES,
+                    ),
+                ),
+                Value(0),
+            )
+        return self.annotate(**annotations)
 
 
 class ProductQuerySet(models.QuerySet):
-    def purchasable(self):
-        return self.filter(active=True, checkout_excluded=False).filter(
-            Q(variants__isnull=True, quantity__gt=0)
-            | Q(
-                variants__active=True,
-                variants__purchasable=True,
-                variants__quantity__gt=0,
+    def with_availability(self, exclude_order_id=None, restore_order_id=None):
+        held = Q(
+            order_items__variant__isnull=True,
+            order_items__reservation__status__in=HELD_RESERVATION_STATUSES,
+        )
+        if exclude_order_id:
+            held &= ~Q(order_items__order_id=exclude_order_id)
+        annotations = {
+            "_held_quantity": Coalesce(
+                Sum("order_items__reservation__quantity", filter=held), Value(0)
             )
-        ).distinct()
+        }
+        if restore_order_id:
+            annotations["_owned_checkout_quantity"] = Coalesce(
+                Sum(
+                    "order_items__reservation__quantity",
+                    filter=Q(
+                        order_items__order_id=restore_order_id,
+                        order_items__variant__isnull=True,
+                        order_items__reservation__status__in=RECOVERABLE_RESERVATION_STATUSES,
+                    ),
+                ),
+                Value(0),
+            )
+        return self.annotate(**annotations)
+
+    def purchasable(self):
+        active_variants = ProductVariant.objects.with_availability().filter(
+            product_id=OuterRef("pk"), active=True
+        )
+        return self.with_availability().alias(
+            has_active_variants=Exists(active_variants),
+            has_available_variant=Exists(
+                active_variants.exclude(sku="").filter(
+                    purchasable=True,
+                    quantity__gt=F("_held_quantity"),
+                )
+            ),
+        ).filter(active=True, checkout_excluded=False, currency="USD").filter(
+            Q(has_available_variant=True)
+            | Q(
+                has_active_variants=False,
+                quantity__gt=F("_held_quantity"),
+            )
+        )
 
 
 class Product(models.Model):
@@ -47,17 +135,67 @@ class Product(models.Model):
 
     @property
     def available_quantity(self):
-        if self.variants.filter(active=True).exists():
-            return self.variants.filter(active=True, purchasable=True).aggregate(
-                total=Sum("quantity")
-            )["total"] or 0
-        return self.quantity
+        active_variants = [variant for variant in self.variants.all() if variant.active]
+        if active_variants:
+            if all(hasattr(variant, "_held_quantity") for variant in active_variants):
+                return sum(
+                    variant.available_quantity
+                    for variant in active_variants
+                    if variant.purchasable and variant.sku
+                )
+            held_quantities = {
+                row["variant_id"]: row["total"]
+                for row in self.order_items.filter(
+                    variant_id__in=[variant.pk for variant in active_variants],
+                    reservation__status__in=HELD_RESERVATION_STATUSES,
+                )
+                .values("variant_id")
+                .annotate(total=Sum("reservation__quantity"))
+            }
+            return sum(
+                max(variant.quantity - held_quantities.get(variant.pk, 0), 0)
+                for variant in active_variants
+                if variant.purchasable and variant.sku
+            )
+        held_quantity = getattr(self, "_held_quantity", None)
+        if held_quantity is None:
+            held_quantity = (
+                self.order_items.filter(
+                    variant__isnull=True,
+                    reservation__status__in=HELD_RESERVATION_STATUSES,
+                ).aggregate(total=Sum("reservation__quantity"))["total"]
+                or 0
+            )
+        return max(self.quantity - held_quantity, 0)
+
+    @property
+    def display_price(self):
+        active_variants = [variant for variant in self.variants.all() if variant.active]
+        if not active_variants:
+            return self.price
+        prices = [
+            variant.price
+            for variant in active_variants
+            if variant.purchasable
+            and variant.sku
+            and variant.available_quantity > 0
+        ]
+        return min(prices) if prices else self.price
+
+    @property
+    def direct_price(self):
+        return calculate_direct_price(self.price)
+
+    @property
+    def display_direct_price(self):
+        return calculate_direct_price(self.display_price)
 
     @property
     def is_purchasable(self):
         return (
             self.active
             and not self.checkout_excluded
+            and self.currency == "USD"
             and self.available_quantity > 0
         )
 
@@ -75,6 +213,8 @@ class ProductVariant(models.Model):
     active = models.BooleanField(default=True)
     purchasable = models.BooleanField(default=True)
 
+    objects = ProductVariantQuerySet.as_manager()
+
     class Meta:
         ordering = ("id",)
         constraints = [
@@ -85,6 +225,22 @@ class ProductVariant(models.Model):
 
     def __str__(self):
         return self.title
+
+    @property
+    def available_quantity(self):
+        held_quantity = getattr(self, "_held_quantity", None)
+        if held_quantity is None:
+            held_quantity = (
+                self.order_items.filter(
+                    reservation__status__in=HELD_RESERVATION_STATUSES
+                ).aggregate(total=Sum("reservation__quantity"))["total"]
+                or 0
+            )
+        return max(self.quantity - held_quantity, 0)
+
+    @property
+    def direct_price(self):
+        return calculate_direct_price(self.price)
 
 
 class ProductImage(models.Model):

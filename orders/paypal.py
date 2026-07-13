@@ -1,6 +1,12 @@
+from urllib.parse import quote
+
 import httpx
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+
+
+class PayPalInstrumentDeclined(RuntimeError):
+    pass
 
 
 class PayPalClient:
@@ -26,6 +32,7 @@ class PayPalClient:
             raise ImproperlyConfigured("PayPal client credentials are required.")
         self.http = http_client or httpx.Client(timeout=20)
         self._owns_http = http_client is None
+        self._access_token = ""
 
     def close(self):
         if self._owns_http:
@@ -38,6 +45,8 @@ class PayPalClient:
         self.close()
 
     def access_token(self):
+        if self._access_token:
+            return self._access_token
         response = self.http.post(
             f"{self.base_url}/v1/oauth2/token",
             auth=(self.client_id, self.client_secret),
@@ -45,7 +54,8 @@ class PayPalClient:
             headers={"Accept": "application/json"},
         )
         response.raise_for_status()
-        return response.json()["access_token"]
+        self._access_token = response.json()["access_token"]
+        return self._access_token
 
     def _headers(self, request_id=None):
         headers = {
@@ -73,12 +83,29 @@ class PayPalClient:
         response.raise_for_status()
         return response.json()
 
+    def get_tracker(self, tracker_id):
+        response = self.http.get(
+            f"{self.base_url}/v1/shipping/trackers/{quote(tracker_id, safe='')}",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def capture_order(self, paypal_order_id, request_id):
         response = self.http.post(
             f"{self.base_url}/v2/checkout/orders/{paypal_order_id}/capture",
             headers={**self._headers(request_id), "Prefer": "return=representation"},
             json={},
         )
+        if response.status_code == 422:
+            payload = response.json()
+            if any(
+                detail.get("issue") == "INSTRUMENT_DECLINED"
+                for detail in payload.get("details", [])
+            ):
+                raise PayPalInstrumentDeclined(
+                    "PayPal declined the selected funding source."
+                )
         response.raise_for_status()
         return response.json()
 
@@ -90,6 +117,14 @@ class PayPalClient:
                 "amount": {"value": str(amount), "currency_code": currency},
                 "invoice_id": invoice_id,
             },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_refund(self, refund_id):
+        response = self.http.get(
+            f"{self.base_url}/v2/payments/refunds/{refund_id}",
+            headers=self._headers(),
         )
         response.raise_for_status()
         return response.json()

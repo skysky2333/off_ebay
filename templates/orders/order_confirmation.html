@@ -11,6 +11,10 @@
       </div>
       <h1>Thank you, {{ order.customer_name }}.</h1>
       <p>Your order is confirmed. Keep this private page; it will show tracking when your order ships.</p>
+      <div class="order-link-tools">
+        <button class="button button--secondary js-only" type="button" data-copy-order-link>Copy private order link</button>
+        <p class="order-link-status" data-copy-order-status role="status" aria-live="polite" hidden></p>
+      </div>
     </header>
     {% include "orders/_order_detail.html" %}
   </div>
