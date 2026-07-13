@@ -117,8 +117,8 @@ The following sequence supports the eBay requirement that its account-deletion e
 ### 1. Prepare the Repository and Secrets
 
 ```bash
-git clone <repository-url>
-cd seller_site
+git clone https://github.com/skysky2333/off_ebay.git
+cd off_ebay
 umask 077
 cp -n .env.example .env
 chmod 600 .env

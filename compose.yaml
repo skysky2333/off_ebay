@@ -1,3 +1,5 @@
+name: seller_site
+
 services:
   db:
     image: postgres:17-bookworm
