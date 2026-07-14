@@ -28,7 +28,7 @@ from catalog.notifications import (
 )
 from catalog.services import process_ebay_account_closure
 from orders.inventory import InventoryUnavailable
-from orders.models import Order, PayPalCase, Shipment
+from orders.models import Order, PayPalCase, Refund, Shipment
 from orders.paypal import PayPalClient, PayPalInstrumentDeclined
 from orders.services import (
     CheckoutLine,
@@ -556,24 +556,49 @@ def _paypal_case_flags(order):
     }
 
 
+def _refund_status_context(order):
+    refunds = list(order.refunds.all())
+    pending_refunds = [
+        refund for refund in refunds if refund.status == Refund.Status.PENDING
+    ]
+    latest_refund = refunds[-1] if refunds else None
+    unsuccessful_refund = (
+        latest_refund
+        if not pending_refunds
+        and latest_refund is not None
+        and latest_refund.status in {Refund.Status.FAILED, Refund.Status.CANCELLED}
+        else None
+    )
+    return {
+        "has_pending_refund": bool(pending_refunds),
+        "pending_refund_total": sum(
+            (refund.amount for refund in pending_refunds),
+            start=Decimal("0.00"),
+        ),
+        "unsuccessful_refund": unsuccessful_refund,
+    }
+
+
 @never_cache
 @require_safe
 def order_confirmation(request, token):
     order = get_object_or_404(
-        Order.objects.prefetch_related("items", "shipments", "paypal_cases"),
+        Order.objects.prefetch_related(
+            "items", "shipments", "refunds", "paypal_cases"
+        ),
         status_token=token,
         paid_at__isnull=False,
     )
-    case_flags = _paypal_case_flags(order)
-    if order.status == Order.Status.REFUNDED or any(case_flags.values()):
+    shipments = list(order.shipments.all())
+    if (
+        order.status != Order.Status.PAID
+        or shipments
+        or list(order.refunds.all())
+        or list(order.paypal_cases.all())
+    ):
         Cart(request).forget_order(order.pk)
         return redirect("storefront:order_status", token=order.status_token)
     Cart(request).forget_order(order.pk)
-    shipments = [
-        shipment
-        for shipment in order.shipments.all()
-        if shipment.status != Shipment.Status.CANCELLED
-    ]
     return render(
         request,
         "orders/order_confirmation.html",
@@ -585,7 +610,9 @@ def order_confirmation(request, token):
 @require_safe
 def order_status(request, token):
     order = get_object_or_404(
-        Order.objects.prefetch_related("items", "shipments", "paypal_cases"),
+        Order.objects.prefetch_related(
+            "items", "shipments", "refunds", "paypal_cases"
+        ),
         status_token=token,
     )
     if (
@@ -610,6 +637,7 @@ def order_status(request, token):
         shipment.status == Shipment.Status.DELIVERED for shipment in shipments
     )
     case_flags = _paypal_case_flags(order)
+    refund_context = _refund_status_context(order)
     return render(
         request,
         "orders/order_status.html",
@@ -619,6 +647,7 @@ def order_status(request, token):
             "has_delivered": has_delivered,
             "is_delivered": is_delivered,
             **case_flags,
+            **refund_context,
             "shipments": shipments,
             "can_resume_payment": (
                 order.status == Order.Status.FUNDING_RETRY

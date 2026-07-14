@@ -225,7 +225,7 @@ curl --user "${EBAY_CLIENT_ID}:${EBAY_CLIENT_SECRET}" \
   https://api.ebay.com/identity/v1/oauth2/token
 ```
 
-Use `https://api.ebay.com/oauth/api_scope` when creating the authorization request. The `redirect_uri` sent to eBay is the RuName identifier, not the human-readable accepted URL.
+Request both `https://api.ebay.com/oauth/api_scope` and `https://api.ebay.com/oauth/api_scope/sell.marketing.readonly` when creating the authorization request. The Marketing read scope lets catalog sync read volume-discount tiers that eBay exposes through the Marketing API. The `redirect_uri` sent to eBay is the RuName identifier, not the human-readable accepted URL.
 
 Copy only the response's `refresh_token` value into `EBAY_REFRESH_TOKEN`. Do not use:
 

@@ -22,6 +22,7 @@ class ValidateConfigTests(SimpleTestCase):
             "STORE_DOMAIN": "shop.fm2k244.com",
             "SUPPORT_EMAIL": "support@fm2k244.com",
             "EBAY_TRADING_ENDPOINT": "https://api.ebay.com/ws/api.dll",
+            "EBAY_MARKETING_ENDPOINT": "https://api.ebay.com/sell/marketing/v1",
             "EBAY_TOKEN_ENDPOINT": "https://api.ebay.com/identity/v1/oauth2/token",
             "EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT": (
                 "https://api.ebay.com/commerce/notification/v1/public_key"
@@ -230,6 +231,7 @@ class ValidateConfigTests(SimpleTestCase):
 
 @override_settings(
     EBAY_TRADING_ENDPOINT="https://api.sandbox.ebay.com/ws/api.dll",
+    EBAY_MARKETING_ENDPOINT="https://api.sandbox.ebay.com/sell/marketing/v1",
     EBAY_TOKEN_ENDPOINT="https://api.sandbox.ebay.com/identity/v1/oauth2/token",
     EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT=(
         "https://api.sandbox.ebay.com/commerce/notification/v1/public_key"
@@ -272,6 +274,9 @@ class CheckoutConfigurationTests(TestCase):
     def test_mixed_provider_environments_fail(self):
         configuration = SimpleNamespace(
             EBAY_TRADING_ENDPOINT="https://api.sandbox.ebay.com/ws/api.dll",
+            EBAY_MARKETING_ENDPOINT=(
+                "https://api.sandbox.ebay.com/sell/marketing/v1"
+            ),
             EBAY_TOKEN_ENDPOINT=(
                 "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
             ),

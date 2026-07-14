@@ -33,6 +33,7 @@ def fixture(name):
     EBAY_COMPATIBILITY_LEVEL="1423",
     EBAY_TOKEN_ENDPOINT="https://api.example/token",
     EBAY_TRADING_ENDPOINT="https://api.example/trading",
+    EBAY_MARKETING_ENDPOINT="https://api.example/marketing",
 )
 class EbayClientTests(TestCase):
     def test_parse_listing_preserves_catalog_data_and_sku_less_variations(self):
@@ -52,60 +53,256 @@ class EbayClientTests(TestCase):
         self.assertTrue(listing.variations[1].purchasable)
         self.assertTrue(listing.variations[1].source_key.startswith("missing-"))
 
-    def test_parse_listing_imports_sorted_volume_discounts(self):
-        root = ElementTree.fromstring(fixture("get_item.xml"))
-        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
-        item = root.find("e:Item", namespace)
-        discounts = ElementTree.SubElement(
-            item, f"{{{namespace['e']}}}ItemDiscounts"
-        )
-        for minimum, percent in ((4, "10.5"), (2, "5")):
-            discount = ElementTree.SubElement(
-                discounts, f"{{{namespace['e']}}}ItemDiscount"
-            )
-            ElementTree.SubElement(
-                discount, f"{{{namespace['e']}}}MinItemCount"
-            ).text = str(minimum)
-            ElementTree.SubElement(
-                discount, f"{{{namespace['e']}}}PercentOff"
-            ).text = percent
+    def test_repeated_get_item_refreshes_marketing_volume_discounts(self):
+        marketing_calls = []
 
-        listing = parse_listing(root)
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            if request.url.path == "/marketing/promotion":
+                marketing_calls.append("summary")
+                self.assertEqual(request.headers["authorization"], "Bearer access")
+                self.assertEqual(request.url.params["marketplace_id"], "EBAY_US")
+                self.assertEqual(
+                    request.url.params["promotion_type"], "VOLUME_DISCOUNT"
+                )
+                self.assertEqual(request.url.params["promotion_status"], "RUNNING")
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 1,
+                        "promotions": [
+                            {
+                                "promotionId": "promotion@EBAY_US",
+                                "promotionStatus": "RUNNING",
+                                "promotionType": "VOLUME_DISCOUNT",
+                            }
+                        ],
+                    },
+                )
+            if request.url.path.startswith("/marketing/item_promotion/"):
+                marketing_calls.append("detail")
+                current_percent = (
+                    "5" if marketing_calls.count("detail") == 1 else "6"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "promotionId": "promotion@EBAY_US",
+                        "promotionStatus": "RUNNING",
+                        "promotionType": "VOLUME_DISCOUNT",
+                        "applyDiscountToSingleItemOnly": False,
+                        "inventoryCriterion": {"listingIds": ["123456789012"]},
+                        "discountRules": [
+                            {
+                                "discountSpecification": {"minQuantity": 1},
+                                "discountBenefit": {"percentageOffOrder": "0"},
+                                "ruleOrder": 1,
+                            },
+                            {
+                                "discountSpecification": {"minQuantity": 3},
+                                "discountBenefit": {"percentageOffOrder": "10.50"},
+                                "ruleOrder": 3,
+                            },
+                            {
+                                "discountSpecification": {"minQuantity": 2},
+                                "discountBenefit": {
+                                    "percentageOffOrder": current_percent
+                                },
+                                "ruleOrder": 2,
+                            },
+                        ],
+                    },
+                )
+            self.assertEqual(request.headers["x-ebay-api-call-name"], "GetItem")
+            return httpx.Response(200, content=fixture("get_item.xml"))
+
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            listing = client.get_item("123456789012")
+            refreshed = client.get_item("123456789012")
 
         self.assertEqual(
             listing.volume_discounts,
             (
                 {"min_quantity": 2, "percent_off": "5"},
-                {"min_quantity": 4, "percent_off": "10.5"},
+                {"min_quantity": 3, "percent_off": "10.5"},
             ),
         )
+        self.assertEqual(
+            refreshed.volume_discounts[0],
+            {"min_quantity": 2, "percent_off": "6"},
+        )
+        self.assertEqual(
+            marketing_calls, ["summary", "detail", "summary", "detail"]
+        )
 
-    def test_parse_listing_rejects_invalid_volume_discounts(self):
-        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
-        for field, value, message in (
-            ("MinItemCount", "1", "quantity"),
-            ("MinItemCount", "two", "quantity"),
-            ("PercentOff", "100", "percentage"),
-            ("PercentOff", "NaN", "percentage"),
-        ):
-            with self.subTest(field=field, value=value):
-                root = ElementTree.fromstring(fixture("get_item.xml"))
-                item = root.find("e:Item", namespace)
-                discounts = ElementTree.SubElement(
-                    item, f"{{{namespace['e']}}}ItemDiscounts"
+    def test_marketing_volume_discounts_paginate(self):
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            if request.url.path == "/marketing/promotion":
+                offset = int(request.url.params["offset"])
+                promotion_id = f"promotion-{offset}@EBAY_US"
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 2,
+                        "promotions": [
+                            {
+                                "promotionId": promotion_id,
+                                "promotionStatus": "RUNNING",
+                                "promotionType": "VOLUME_DISCOUNT",
+                            }
+                        ],
+                    },
                 )
-                discount = ElementTree.SubElement(
-                    discounts, f"{{{namespace['e']}}}ItemDiscount"
-                )
-                values = {"MinItemCount": "2", "PercentOff": "5"}
-                values[field] = value
-                for name, text in values.items():
-                    ElementTree.SubElement(
-                        discount, f"{{{namespace['e']}}}{name}"
-                    ).text = text
+            promotion_id = request.url.path.rsplit("/", 1)[-1]
+            offset = 0 if promotion_id.startswith("promotion-0") else 1
+            return httpx.Response(
+                200,
+                json={
+                    "promotionId": f"promotion-{offset}@EBAY_US",
+                    "promotionStatus": "RUNNING",
+                    "promotionType": "VOLUME_DISCOUNT",
+                    "applyDiscountToSingleItemOnly": True,
+                    "inventoryCriterion": {"listingIds": [str(offset)]},
+                    "discountRules": [
+                        {
+                            "discountSpecification": {"minQuantity": 1},
+                            "discountBenefit": {"percentageOffOrder": "0"},
+                            "ruleOrder": 1,
+                        },
+                        {
+                            "discountSpecification": {"minQuantity": 2},
+                            "discountBenefit": {"percentageOffOrder": "30"},
+                            "ruleOrder": 2,
+                        },
+                    ],
+                },
+            )
 
-                with self.assertRaisesMessage(EbayResponseError, message):
-                    parse_listing(root)
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            discounts = client.volume_discounts()
+
+        self.assertEqual(set(discounts), {"0", "1"})
+
+    def test_marketing_snapshot_retries_a_promotion_that_stops_running(self):
+        summary_calls = 0
+
+        def handler(request):
+            nonlocal summary_calls
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            if request.url.path == "/marketing/promotion":
+                summary_calls += 1
+                promotions = (
+                    [
+                        {
+                            "promotionId": "ended@EBAY_US",
+                            "promotionStatus": "RUNNING",
+                            "promotionType": "VOLUME_DISCOUNT",
+                        }
+                    ]
+                    if summary_calls == 1
+                    else []
+                )
+                return httpx.Response(
+                    200,
+                    json={"total": len(promotions), "promotions": promotions},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "promotionId": "ended@EBAY_US",
+                    "promotionStatus": "ENDED",
+                    "promotionType": "VOLUME_DISCOUNT",
+                },
+            )
+
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            discounts = client.volume_discounts()
+
+        self.assertEqual(discounts, {})
+        self.assertEqual(summary_calls, 2)
+
+    def test_rejects_volume_discount_combining_multiple_listings(self):
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            if request.url.path == "/marketing/promotion":
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 1,
+                        "promotions": [
+                            {
+                                "promotionId": "promotion@EBAY_US",
+                                "promotionStatus": "RUNNING",
+                                "promotionType": "VOLUME_DISCOUNT",
+                            }
+                        ],
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "promotionId": "promotion@EBAY_US",
+                    "promotionStatus": "RUNNING",
+                    "promotionType": "VOLUME_DISCOUNT",
+                    "applyDiscountToSingleItemOnly": False,
+                    "inventoryCriterion": {"listingIds": ["111", "222"]},
+                    "discountRules": [
+                        {
+                            "discountSpecification": {"minQuantity": 1},
+                            "discountBenefit": {"percentageOffOrder": "0"},
+                        },
+                        {
+                            "discountSpecification": {"minQuantity": 2},
+                            "discountBenefit": {"percentageOffOrder": "30"},
+                        },
+                    ],
+                },
+            )
+
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaisesMessage(EbayResponseError, "combines multiple"):
+                client.volume_discounts()
+
+    def test_marketing_api_errors_are_reported_as_ebay_response_errors(self):
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            if request.url.path == "/marketing/promotion":
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 1,
+                        "promotions": [
+                            {
+                                "promotionId": "seller-hub@EBAY_US",
+                                "promotionStatus": "RUNNING",
+                                "promotionType": "VOLUME_DISCOUNT",
+                            }
+                        ],
+                    },
+                )
+            return httpx.Response(
+                400,
+                json={
+                    "errors": [
+                        {
+                            "errorId": 345076,
+                            "message": "Promotion details are unavailable.",
+                        }
+                    ]
+                },
+            )
+
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaisesMessage(
+                EbayResponseError, "345076: Promotion details are unavailable."
+            ):
+                client.volume_discounts()
 
     def test_parse_listing_uses_the_lowest_available_purchasable_variant_price(self):
         root = ElementTree.fromstring(fixture("get_item.xml"))
@@ -424,6 +621,9 @@ class FakeClient:
             raise RuntimeError("detail sync failed")
         return self.listings[item_id]
 
+    def get_item_without_volume_discounts(self, item_id):
+        return self.get_item(item_id)
+
 
 def product(item_id="999", **overrides):
     values = {
@@ -647,6 +847,8 @@ class CatalogSyncTests(TestCase):
             def get_item(self, item_id):
                 return self.listing
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
                 self.args = (item_id, quantity, message_id, sku)
                 return quantity
@@ -703,6 +905,8 @@ class CatalogSyncTests(TestCase):
             def get_item(self, item_id):
                 return listing
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
                 return quantity
 
@@ -738,6 +942,8 @@ class CatalogSyncTests(TestCase):
 
             def get_item(self, item_id):
                 return self.listing
+
+            get_item_without_volume_discounts = get_item
 
             def revise_inventory_status(self, *args):
                 raise AssertionError("SKU-less inventory must use variation specifics")
@@ -797,6 +1003,8 @@ class CatalogSyncTests(TestCase):
             def get_item(self, item_id):
                 return self.listing
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, *args):
                 raise AssertionError("A confirmed quantity must not be replayed")
 
@@ -852,6 +1060,8 @@ class CatalogSyncTests(TestCase):
             def get_item(self, item_id):
                 return listing
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, *args):
                 raise AssertionError("A changed quote must not reduce inventory")
 
@@ -877,6 +1087,8 @@ class CatalogSyncTests(TestCase):
         class InventoryClient:
             def get_item(self, item_id):
                 return self.listing
+
+            get_item_without_volume_discounts = get_item
 
             def revise_inventory_status(self, *args):
                 raise AssertionError("Ambiguous inventory must not be rewritten")

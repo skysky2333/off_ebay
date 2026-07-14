@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from catalog.models import Product
-from orders.models import InventoryReservation, Order, PayPalCase, Shipment
+from orders.models import InventoryReservation, Order, PayPalCase, Refund, Shipment
 from orders.paypal import PayPalInstrumentDeclined
 from orders.services import (
     CheckoutLine,
@@ -97,6 +97,7 @@ class InventoryDouble:
     EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT=(
         "https://api.sandbox.ebay.com/commerce/notification/v1/public_key"
     ),
+    EBAY_MARKETING_ENDPOINT="https://api.sandbox.ebay.com/sell/marketing/v1",
     EBAY_CLIENT_ID="ebay-client",
     EBAY_CLIENT_SECRET="ebay-secret",
     EBAY_REFRESH_TOKEN="ebay-refresh",
@@ -966,6 +967,113 @@ class StorefrontTests(TestCase):
             ),
         )
 
+    def test_order_status_surfaces_pending_and_unsuccessful_refunds(self):
+        order = self.create_status_order(Order.Status.PAID)
+        order.paid_at = timezone.now()
+        order.save(update_fields=("paid_at", "updated_at"))
+        refund = Refund.objects.create(
+            order=order,
+            paypal_refund_id="REFUND-CUSTOMER-STATUS",
+            amount=Decimal("7.25"),
+            status=Refund.Status.PENDING,
+        )
+        status_url = reverse(
+            "storefront:order_status", kwargs={"token": order.status_token}
+        )
+
+        pending_response = self.client.get(status_url)
+
+        self.assertContains(pending_response, "Your refund is pending.")
+        self.assertContains(pending_response, "A $7.25 USD refund is pending.")
+        self.assertNotContains(pending_response, "Your order is being prepared.")
+
+        Shipment.objects.create(
+            order=order,
+            carrier="USPS",
+            tracking_number="PENDING-REFUND-SHIPPED",
+            status=Shipment.Status.SHIPPED,
+        )
+        shipped_response = self.client.get(status_url)
+
+        self.assertContains(shipped_response, "Your order is on its way.")
+        self.assertContains(shipped_response, "A $7.25 USD refund is pending.")
+        self.assertContains(shipped_response, "PENDING-REFUND-SHIPPED")
+
+        refund.status = Refund.Status.FAILED
+        refund.save(update_fields=("status", "updated_at"))
+        failed_response = self.client.get(status_url)
+
+        self.assertContains(
+            failed_response, "A $7.25 USD refund could not be completed."
+        )
+        self.assertNotContains(failed_response, "Refund pending")
+        self.assertContains(failed_response, "Your order is on its way.")
+
+        refund.status = Refund.Status.CANCELLED
+        refund.save(update_fields=("status", "updated_at"))
+        cancelled_response = self.client.get(status_url)
+
+        self.assertContains(
+            cancelled_response, "A $7.25 USD refund was cancelled."
+        )
+        self.assertNotContains(cancelled_response, "refund could not be completed")
+
+    def test_confirmation_redirects_to_status_after_any_order_update(self):
+        shipped = self.create_status_order(Order.Status.PAID)
+        shipped.paid_at = timezone.now()
+        shipped.save(update_fields=("paid_at", "updated_at"))
+        Shipment.objects.create(
+            order=shipped,
+            carrier="USPS",
+            tracking_number="CONFIRMATION-UPDATE",
+            status=Shipment.Status.LABEL_CREATED,
+        )
+
+        refund_attempted = self.create_status_order(Order.Status.PAID)
+        refund_attempted.paid_at = timezone.now()
+        refund_attempted.save(update_fields=("paid_at", "updated_at"))
+        Refund.objects.create(
+            order=refund_attempted,
+            paypal_refund_id="REFUND-CONFIRMATION-UPDATE",
+            amount=Decimal("20.00"),
+            status=Refund.Status.FAILED,
+        )
+
+        fulfilling = self.create_status_order(Order.Status.FULFILLING)
+        fulfilling.paid_at = timezone.now()
+        fulfilling.save(update_fields=("paid_at", "updated_at"))
+
+        resolved_case = self.create_status_order(Order.Status.PAID)
+        resolved_case.paid_at = timezone.now()
+        resolved_case.save(update_fields=("paid_at", "updated_at"))
+        PayPalCase.objects.create(
+            order=resolved_case,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id="PP-D-CONFIRMATION-UPDATE",
+            status=PayPalCase.Status.RESOLVED,
+            outcome="RESOLVED_SELLER_FAVOUR",
+            amount=Decimal("20.00"),
+            currency="USD",
+            last_event_type="CUSTOMER.DISPUTE.RESOLVED",
+        )
+
+        for order in (shipped, refund_attempted, fulfilling, resolved_case):
+            with self.subTest(order=order.reference):
+                response = self.client.get(
+                    reverse(
+                        "storefront:order_confirmation",
+                        kwargs={"token": order.status_token},
+                    )
+                )
+
+                self.assertRedirects(
+                    response,
+                    reverse(
+                        "storefront:order_status",
+                        kwargs={"token": order.status_token},
+                    ),
+                )
+
     def test_private_order_status_surfaces_paypal_cases_without_internal_details(self):
         disputed = self.create_status_order(Order.Status.PAID)
         disputed.paid_at = timezone.now()
@@ -994,7 +1102,9 @@ class StorefrontTests(TestCase):
         )
 
         self.assertContains(dispute_response, "PayPal review")
+        self.assertContains(dispute_response, "This order is under PayPal review.")
         self.assertContains(dispute_response, "A PayPal case is under review.")
+        self.assertNotContains(dispute_response, "Your order is being prepared.")
         self.assertNotContains(dispute_response, "UNAUTHORIZED_TRANSACTION")
         self.assertNotContains(dispute_response, "Waiting for seller response")
         self.assertRedirects(confirmation_response, status_url)
@@ -1029,7 +1139,9 @@ class StorefrontTests(TestCase):
         )
 
         self.assertContains(reversal_response, "Payment reversed")
+        self.assertContains(reversal_response, "This payment was reversed.")
         self.assertContains(reversal_response, "PayPal reversed this payment.")
+        self.assertNotContains(reversal_response, "Your order is being prepared.")
         self.assertNotContains(reversal_response, "CHARGEBACK")
 
     def test_private_order_pages_hide_cancelled_shipments(self):
@@ -1049,18 +1161,18 @@ class StorefrontTests(TestCase):
             status=Shipment.Status.CANCELLED,
         )
 
+        confirmation_url = reverse(
+            "storefront:order_confirmation", kwargs={"token": order.status_token}
+        )
+        status_url = reverse(
+            "storefront:order_status", kwargs={"token": order.status_token}
+        )
+        confirmation = self.client.get(confirmation_url)
+
+        self.assertRedirects(confirmation, status_url)
         responses = (
-            self.client.get(
-                reverse(
-                    "storefront:order_confirmation",
-                    kwargs={"token": order.status_token},
-                )
-            ),
-            self.client.get(
-                reverse(
-                    "storefront:order_status", kwargs={"token": order.status_token}
-                )
-            ),
+            self.client.get(confirmation_url, follow=True),
+            self.client.get(status_url),
         )
 
         for response in responses:

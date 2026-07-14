@@ -1,7 +1,8 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 from xml.etree import ElementTree
 
 import httpx
@@ -19,6 +20,8 @@ XML_NAMESPACE = "urn:ebay:apis:eBLBaseComponents"
 NS = {"e": XML_NAMESPACE}
 SUPPORTED_LISTING_TYPES = {"FixedPriceItem", "StoresFixedPrice"}
 ACTIVE_LISTING_STATUS = "Active"
+EBAY_MARKETPLACE_ID = "EBAY_US"
+MARKETING_PAGE_SIZE = 200
 validate_https_url = URLValidator(schemes=("https",))
 DESCRIPTION_TAGS = {
     "a",
@@ -221,33 +224,108 @@ def _shipping(item):
     }
 
 
-def _volume_discounts(item):
-    discounts = []
-    minimums = set()
-    for discount in item.findall("e:ItemDiscounts/e:ItemDiscount", NS):
-        minimum_text = _required_text(discount, "e:MinItemCount")
-        if not minimum_text.isascii() or not minimum_text.isdigit():
-            raise EbayResponseError("eBay response has invalid volume discount quantity")
-        minimum = int(minimum_text)
-        if minimum < 2 or minimum in minimums:
-            raise EbayResponseError("eBay response has invalid volume discount quantity")
-        minimums.add(minimum)
+def _promotion_volume_discount(promotion):
+    if not isinstance(promotion, dict):
+        raise EbayResponseError("eBay volume discount response is invalid")
+    if promotion.get("promotionStatus") != "RUNNING":
+        raise EbayResponseError("eBay volume discount is not running")
+    if promotion.get("promotionType") != "VOLUME_DISCOUNT":
+        raise EbayResponseError("eBay promotion is not a volume discount")
 
-        percent_text = _required_text(discount, "e:PercentOff")
+    criterion = promotion.get("inventoryCriterion")
+    listing_ids = criterion.get("listingIds") if isinstance(criterion, dict) else None
+    if (
+        not isinstance(listing_ids, list)
+        or not listing_ids
+        or any(not isinstance(item_id, str) or not item_id for item_id in listing_ids)
+        or len(set(listing_ids)) != len(listing_ids)
+    ):
+        raise EbayResponseError("eBay volume discount has invalid listing IDs")
+    single_item_only = promotion.get("applyDiscountToSingleItemOnly")
+    if not isinstance(single_item_only, bool):
+        raise EbayResponseError("eBay volume discount has invalid item scope")
+    if not single_item_only and len(listing_ids) > 1:
+        raise EbayResponseError(
+            "eBay volume discount combines multiple listings and cannot be priced"
+        )
+
+    rules = promotion.get("discountRules")
+    if not isinstance(rules, list) or not 2 <= len(rules) <= 4:
+        raise EbayResponseError("eBay volume discount has invalid rules")
+    ordered_rules = []
+    rule_orders = set()
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise EbayResponseError("eBay volume discount has invalid rules")
+        rule_order = rule.get("ruleOrder")
+        if (
+            isinstance(rule_order, bool)
+            or not isinstance(rule_order, int)
+            or rule_order < 1
+            or rule_order in rule_orders
+        ):
+            raise EbayResponseError("eBay volume discount has invalid rule order")
+        rule_orders.add(rule_order)
+        ordered_rules.append((rule_order, rule))
+    if rule_orders != set(range(1, len(rules) + 1)):
+        raise EbayResponseError("eBay volume discount has invalid rule order")
+
+    discounts = []
+    previous_percent = Decimal("-1")
+    for expected_quantity, (_, rule) in enumerate(sorted(ordered_rules), start=1):
+        specification = rule.get("discountSpecification")
+        benefit = rule.get("discountBenefit")
+        minimum = (
+            specification.get("minQuantity")
+            if isinstance(specification, dict)
+            else None
+        )
+        percent_text = (
+            benefit.get("percentageOffOrder")
+            if isinstance(benefit, dict)
+            else None
+        )
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or minimum != expected_quantity
+        ):
+            raise EbayResponseError("eBay response has invalid volume discount quantity")
+        if not isinstance(percent_text, str):
+            raise EbayResponseError(
+                "eBay response has invalid volume discount percentage"
+            )
         try:
             percent = Decimal(percent_text)
         except InvalidOperation as error:
             raise EbayResponseError(
                 "eBay response has invalid volume discount percentage"
             ) from error
-        if not percent.is_finite() or percent <= 0 or percent >= 100:
+        if not percent.is_finite() or percent < 0 or percent >= 100:
             raise EbayResponseError(
                 "eBay response has invalid volume discount percentage"
             )
+        if minimum == 1:
+            if percent != 0:
+                raise EbayResponseError(
+                    "eBay response has invalid volume discount baseline"
+                )
+            previous_percent = percent
+            continue
+        if percent <= previous_percent:
+            raise EbayResponseError(
+                "eBay response has invalid volume discount percentage"
+            )
+        previous_percent = percent
         discounts.append(
-            {"min_quantity": minimum, "percent_off": format(percent, "f")}
+            {
+                "min_quantity": minimum,
+                "percent_off": format(percent.normalize(), "f"),
+            }
         )
-    return tuple(sorted(discounts, key=lambda tier: tier["min_quantity"]))
+    return tuple(listing_ids), tuple(
+        sorted(discounts, key=lambda tier: tier["min_quantity"])
+    )
 
 
 def _https_url(url, kind):
@@ -386,7 +464,6 @@ def parse_listing(response):
         ends_at=_date(item, "e:ListingDetails/e:EndTime"),
         images=_images(item),
         variations=variations,
-        volume_discounts=_volume_discounts(item),
     )
 
 
@@ -404,6 +481,8 @@ class EbayTradingClient:
             raise ImproperlyConfigured(f"Missing eBay settings: {', '.join(missing)}")
         self.http = httpx.Client(timeout=30, transport=transport)
         self.access_token = ""
+        self._volume_discounts = None
+        self._volume_discount_quotes = set()
 
     def __enter__(self):
         return self
@@ -472,6 +551,137 @@ class EbayTradingClient:
             raise EbayResponseError("; ".join(errors) or f"eBay {name} failed")
         return root
 
+    def _marketing_get(self, resource, params=None):
+        self._ensure_account_open()
+        if not self.access_token:
+            self.refresh_access_token()
+        response = self.http.get(
+            f"{settings.EBAY_MARKETING_ENDPOINT.rstrip('/')}/{resource}",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Language": "en-US",
+            },
+            params=params,
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            try:
+                failure = response.json()
+            except ValueError:
+                failure = None
+            messages = []
+            if isinstance(failure, dict) and isinstance(failure.get("errors"), list):
+                for entry in failure["errors"]:
+                    if not isinstance(entry, dict):
+                        continue
+                    message = entry.get("message")
+                    error_id = entry.get("errorId")
+                    if isinstance(message, str):
+                        messages.append(
+                            f"{error_id}: {message}"
+                            if isinstance(error_id, (int, str))
+                            and not isinstance(error_id, bool)
+                            else message
+                        )
+            detail = "; ".join(filter(None, messages))
+            raise EbayResponseError(
+                detail
+                or f"eBay Marketing request failed with HTTP {response.status_code}"
+            ) from error
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise EbayResponseError(
+                "eBay Marketing response is not valid JSON"
+            ) from error
+        if not isinstance(payload, dict):
+            raise EbayResponseError("eBay Marketing response is invalid")
+        return payload
+
+    def _volume_discount_snapshot(self):
+        summaries = []
+        promotion_ids = set()
+        offset = 0
+        while True:
+            page = self._marketing_get(
+                "promotion",
+                {
+                    "marketplace_id": EBAY_MARKETPLACE_ID,
+                    "promotion_status": "RUNNING",
+                    "promotion_type": "VOLUME_DISCOUNT",
+                    "limit": MARKETING_PAGE_SIZE,
+                    "offset": offset,
+                },
+            )
+            total = page.get("total")
+            promotions = page.get("promotions", [])
+            if (
+                isinstance(total, bool)
+                or not isinstance(total, int)
+                or total < 0
+                or not isinstance(promotions, list)
+            ):
+                raise EbayResponseError("eBay promotion page is invalid")
+            if not promotions and offset < total:
+                raise EbayResponseError("eBay promotion pagination ended early")
+            for summary in promotions:
+                if not isinstance(summary, dict):
+                    raise EbayResponseError("eBay promotion summary is invalid")
+                promotion_id = summary.get("promotionId")
+                if (
+                    not isinstance(promotion_id, str)
+                    or not promotion_id
+                    or promotion_id in promotion_ids
+                    or summary.get("promotionStatus") != "RUNNING"
+                    or summary.get("promotionType") != "VOLUME_DISCOUNT"
+                ):
+                    raise EbayResponseError("eBay promotion summary is invalid")
+                promotion_ids.add(promotion_id)
+                summaries.append(promotion_id)
+            offset += len(promotions)
+            if offset >= total:
+                break
+
+        by_item = {}
+        changed_during_snapshot = False
+        for promotion_id in summaries:
+            promotion = self._marketing_get(
+                f"item_promotion/{quote(promotion_id, safe='')}"
+            )
+            if promotion.get("promotionId") != promotion_id:
+                raise EbayResponseError("eBay promotion detail ID does not match")
+            if promotion.get("promotionType") != "VOLUME_DISCOUNT":
+                raise EbayResponseError("eBay promotion is not a volume discount")
+            status = promotion.get("promotionStatus")
+            if not isinstance(status, str):
+                raise EbayResponseError("eBay volume discount status is invalid")
+            if status != "RUNNING":
+                changed_during_snapshot = True
+                continue
+            listing_ids, tiers = _promotion_volume_discount(promotion)
+            for item_id in listing_ids:
+                if item_id in by_item:
+                    raise EbayResponseError(
+                        f"eBay listing {item_id} has overlapping volume discounts"
+                    )
+                by_item[item_id] = tiers
+        return by_item, changed_during_snapshot
+
+    def volume_discounts(self, refresh=False):
+        if refresh:
+            self._volume_discounts = None
+        if self._volume_discounts is not None:
+            return self._volume_discounts
+
+        for attempt in range(2):
+            by_item, changed_during_snapshot = self._volume_discount_snapshot()
+            if not changed_during_snapshot or attempt == 1:
+                self._volume_discounts = by_item
+                return self._volume_discounts
+        raise AssertionError("Unreachable volume discount snapshot state")
+
     def get_user(self):
         response = self._call("GetUser", _element("GetUserRequest"))
         return EbayUserIdentity(
@@ -518,12 +728,22 @@ class EbayTradingClient:
                 return item_ids
             page += 1
 
-    def get_item(self, item_id):
+    def get_item_without_volume_discounts(self, item_id):
         request = _element("GetItemRequest")
         _child(request, "DetailLevel", "ReturnAll")
         _child(request, "IncludeItemSpecifics", "true")
         _child(request, "ItemID", item_id)
         return parse_listing(self._call("GetItem", request))
+
+    def get_item(self, item_id):
+        listing = self.get_item_without_volume_discounts(item_id)
+        refresh = listing.item_id in self._volume_discount_quotes
+        discounts = self.volume_discounts(refresh=refresh)
+        self._volume_discount_quotes.add(listing.item_id)
+        return replace(
+            listing,
+            volume_discounts=discounts.get(listing.item_id, ()),
+        )
 
     def revise_variation_inventory(
         self,
@@ -556,7 +776,7 @@ class EbayTradingClient:
             for value in values:
                 _child(entry, "Value", value)
         self._call("ReviseFixedPriceItem", request)
-        listing = self.get_item(item_id)
+        listing = self.get_item_without_volume_discounts(item_id)
         matches = [
             variation
             for variation in listing.variations
@@ -582,7 +802,7 @@ class EbayTradingClient:
             _child(status, "SKU", sku)
         _child(status, "Quantity", quantity)
         self._call("ReviseInventoryStatus", request)
-        listing = self.get_item(item_id)
+        listing = self.get_item_without_volume_discounts(item_id)
         if sku:
             matches = [
                 variation for variation in listing.variations if variation.sku == sku

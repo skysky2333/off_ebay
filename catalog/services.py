@@ -372,7 +372,11 @@ def set_inventory_quantity(
         product = Product.objects.select_for_update().get(pk=product.pk)
         if variant is not None:
             variant = ProductVariant.objects.select_for_update().get(pk=variant.pk)
-        listing = client.get_item(product.ebay_item_id)
+        listing = (
+            client.get_item(product.ebay_item_id)
+            if expected_price is not None
+            else client.get_item_without_volume_discounts(product.ebay_item_id)
+        )
         if listing.item_id != product.ebay_item_id:
             raise EbayResponseError(
                 f"GetItem returned {listing.item_id} for {product.ebay_item_id}"

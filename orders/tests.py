@@ -1462,6 +1462,8 @@ class OrderServiceTests(TestCase):
                     variations=(),
                 )
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
                 type(self).revise_calls += 1
                 type(self).quantity = quantity
@@ -1515,6 +1517,8 @@ class OrderServiceTests(TestCase):
                     quantity=type(self).quantities.pop(0),
                     variations=(),
                 )
+
+            get_item_without_volume_discounts = get_item
 
             def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
                 type(self).revise_calls += 1
@@ -1577,6 +1581,8 @@ class OrderServiceTests(TestCase):
                     quantity=2,
                     variations=(),
                 )
+
+            get_item_without_volume_discounts = get_item
 
             def revise_inventory_status(self, *args):
                 type(self).revise_calls += 1
@@ -1651,6 +1657,8 @@ class OrderServiceTests(TestCase):
             def get_item(self, item_id):
                 return listings.pop(0)
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, *args):
                 raise AssertionError("Removed inventory must not be restored")
 
@@ -1719,6 +1727,8 @@ class OrderServiceTests(TestCase):
             def get_item(self, item_id):
                 return listing
 
+            get_item_without_volume_discounts = get_item
+
             def revise_inventory_status(self, *args):
                 raise AssertionError("Ambiguous inventory must not be restored")
 
@@ -1766,6 +1776,8 @@ class OrderServiceTests(TestCase):
 
             def get_item(self, item_id):
                 return listing
+
+            get_item_without_volume_discounts = get_item
 
             def revise_inventory_status(self, *args):
                 raise AssertionError("Inactive inventory must not be restored")

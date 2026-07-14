@@ -26,6 +26,11 @@
           {% elif has_active_paypal_dispute %}
             <span class="status-chip status-chip--paypal-review">PayPal review</span>
           {% endif %}
+          {% if has_pending_refund %}
+            <span class="status-chip status-chip--capture_pending">Refund pending</span>
+          {% elif unsuccessful_refund %}
+            <span class="status-chip status-chip--cancelled">Refund not completed</span>
+          {% endif %}
         </div>
         <span class="order-reference">Order {{ order.reference }}</span>
       </div>
@@ -38,6 +43,15 @@
       {% elif has_shipped %}
         <h1>Your order is on its way.</h1>
         <p>Shipment details and tracking are listed below.</p>
+      {% elif has_paypal_reversal %}
+        <h1>This payment was reversed.</h1>
+        <p>Contact store support if you need help with this order.</p>
+      {% elif has_active_paypal_dispute %}
+        <h1>This order is under PayPal review.</h1>
+        <p>Order updates will continue to appear here while PayPal reviews the case.</p>
+      {% elif has_pending_refund %}
+        <h1>Your refund is pending.</h1>
+        <p>PayPal is still processing the refund to the original payment method.</p>
       {% elif order.status == "paid" or order.status == "fulfilling" %}
         <h1>Your order is being prepared.</h1>
         <p>Payment is complete. Tracking will appear here after shipment.</p>
@@ -70,10 +84,25 @@
       {% elif has_shipped and order.status == "refunded" %}
         <p class="order-refund-note">Your refund was processed. PayPal will return it to the original payment method.</p>
       {% endif %}
+      {% if has_pending_refund %}
+        <div class="order-payment-notice" role="status">
+          <strong>A ${{ pending_refund_total|floatformat:2 }} {{ order.currency }} refund is pending.</strong>
+          <span>PayPal is processing it to the original payment method. This page will update after PayPal completes it.</span>
+        </div>
+      {% elif unsuccessful_refund %}
+        <div class="order-payment-notice order-payment-notice--danger" role="status">
+          {% if unsuccessful_refund.status == "cancelled" %}
+            <strong>A ${{ unsuccessful_refund.amount|floatformat:2 }} {{ order.currency }} refund was cancelled.</strong>
+          {% else %}
+            <strong>A ${{ unsuccessful_refund.amount|floatformat:2 }} {{ order.currency }} refund could not be completed.</strong>
+          {% endif %}
+          <span>PayPal did not complete this refund. Contact store support if you still expect it.</span>
+        </div>
+      {% endif %}
       {% if has_paypal_reversal %}
         <div class="order-payment-notice order-payment-notice--danger" role="status">
           <strong>PayPal reversed this payment.</strong>
-          <span>The payment is under review. Contact store support if you need help with this order.</span>
+          <span>Contact store support if you need help with this order.</span>
         </div>
       {% elif has_active_paypal_dispute %}
         <div class="order-payment-notice" role="status">

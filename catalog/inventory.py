@@ -178,7 +178,7 @@ class EbayInventoryGateway:
                 expected = operation.expected_quantity
                 target = operation.requested_quantity
             else:
-                listing = client.get_item(item.ebay_item_id)
+                listing = client.get_item_without_volume_discounts(item.ebay_item_id)
                 if listing.item_id != item.ebay_item_id:
                     raise EbayResponseError(
                         f"GetItem returned {listing.item_id} for {item.ebay_item_id}"

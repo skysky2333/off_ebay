@@ -7,12 +7,14 @@ from .models import StoreSettings
 PROVIDER_ENDPOINTS = {
     "live": (
         "https://api.ebay.com/ws/api.dll",
+        "https://api.ebay.com/sell/marketing/v1",
         "https://api.ebay.com/identity/v1/oauth2/token",
         "https://api.ebay.com/commerce/notification/v1/public_key",
         "https://api-m.paypal.com",
     ),
     "sandbox": (
         "https://api.sandbox.ebay.com/ws/api.dll",
+        "https://api.sandbox.ebay.com/sell/marketing/v1",
         "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
         "https://api.sandbox.ebay.com/commerce/notification/v1/public_key",
         "https://api-m.sandbox.paypal.com",
@@ -23,6 +25,7 @@ PROVIDER_ENDPOINTS = {
 def provider_endpoints(configuration=settings):
     return (
         configuration.EBAY_TRADING_ENDPOINT,
+        configuration.EBAY_MARKETING_ENDPOINT,
         configuration.EBAY_TOKEN_ENDPOINT,
         configuration.EBAY_NOTIFICATION_PUBLIC_KEY_ENDPOINT,
         configuration.PAYPAL_API_BASE_URL,

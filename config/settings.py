@@ -186,6 +186,9 @@ STORE_DOMAIN = os.environ.get("STORE_DOMAIN", "")
 EBAY_TRADING_ENDPOINT = os.environ.get(
     "EBAY_TRADING_ENDPOINT", "https://api.ebay.com/ws/api.dll"
 )
+EBAY_MARKETING_ENDPOINT = os.environ.get(
+    "EBAY_MARKETING_ENDPOINT", "https://api.ebay.com/sell/marketing/v1"
+)
 EBAY_TOKEN_ENDPOINT = os.environ.get(
     "EBAY_TOKEN_ENDPOINT", "https://api.ebay.com/identity/v1/oauth2/token"
 )
