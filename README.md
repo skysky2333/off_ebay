@@ -495,13 +495,6 @@ docker compose run --rm --build -e DJANGO_DEBUG=1 web python manage.py test
 | CSRF or redirect errors | Make `STORE_DOMAIN`, `DJANGO_ALLOWED_HOSTS`, and `DJANGO_CSRF_TRUSTED_ORIGINS` exact and ensure the proxy sends `X-Forwarded-Proto: https`. |
 | `.env` was edited but nothing changed | Recreate containers with `docker compose up -d --force-recreate web worker --wait`; `restart` preserves the old environment. |
 
-## Security and Repository Hygiene
+## License
 
-- Never commit `.env`, `.env.local`, database dumps, customer data, provider tokens, or Cloudflare tunnel credentials.
-- Never paste credentials into issues, screenshots, logs, or chat. Rotate any value that is exposed.
-- Keep Admin credentials unique and restrict Admin access to trusted operators.
-- Keep Docker Desktop, the host OS, and provider credentials current.
-- Test restores periodically; an untested backup is not a recovery plan.
-- No analytics or advertising trackers are included.
-
-The repository currently does not include an open-source license. Source availability alone does not grant redistribution or modification rights.
+Off-Ebay is licensed under the [BSD 2-Clause License](LICENSE).
