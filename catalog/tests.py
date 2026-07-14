@@ -52,6 +52,61 @@ class EbayClientTests(TestCase):
         self.assertTrue(listing.variations[1].purchasable)
         self.assertTrue(listing.variations[1].source_key.startswith("missing-"))
 
+    def test_parse_listing_imports_sorted_volume_discounts(self):
+        root = ElementTree.fromstring(fixture("get_item.xml"))
+        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+        item = root.find("e:Item", namespace)
+        discounts = ElementTree.SubElement(
+            item, f"{{{namespace['e']}}}ItemDiscounts"
+        )
+        for minimum, percent in ((4, "10.5"), (2, "5")):
+            discount = ElementTree.SubElement(
+                discounts, f"{{{namespace['e']}}}ItemDiscount"
+            )
+            ElementTree.SubElement(
+                discount, f"{{{namespace['e']}}}MinItemCount"
+            ).text = str(minimum)
+            ElementTree.SubElement(
+                discount, f"{{{namespace['e']}}}PercentOff"
+            ).text = percent
+
+        listing = parse_listing(root)
+
+        self.assertEqual(
+            listing.volume_discounts,
+            (
+                {"min_quantity": 2, "percent_off": "5"},
+                {"min_quantity": 4, "percent_off": "10.5"},
+            ),
+        )
+
+    def test_parse_listing_rejects_invalid_volume_discounts(self):
+        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+        for field, value, message in (
+            ("MinItemCount", "1", "quantity"),
+            ("MinItemCount", "two", "quantity"),
+            ("PercentOff", "100", "percentage"),
+            ("PercentOff", "NaN", "percentage"),
+        ):
+            with self.subTest(field=field, value=value):
+                root = ElementTree.fromstring(fixture("get_item.xml"))
+                item = root.find("e:Item", namespace)
+                discounts = ElementTree.SubElement(
+                    item, f"{{{namespace['e']}}}ItemDiscounts"
+                )
+                discount = ElementTree.SubElement(
+                    discounts, f"{{{namespace['e']}}}ItemDiscount"
+                )
+                values = {"MinItemCount": "2", "PercentOff": "5"}
+                values[field] = value
+                for name, text in values.items():
+                    ElementTree.SubElement(
+                        discount, f"{{{namespace['e']}}}{name}"
+                    ).text = text
+
+                with self.assertRaisesMessage(EbayResponseError, message):
+                    parse_listing(root)
+
     def test_parse_listing_uses_the_lowest_available_purchasable_variant_price(self):
         root = ElementTree.fromstring(fixture("get_item.xml"))
         namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
@@ -419,6 +474,29 @@ class CatalogSyncTests(TestCase):
         self.assertTrue(existing.variants.get(sku="").purchasable)
         self.assertFalse(stale.active)
         self.assertEqual(stale.quantity, 0)
+
+    def test_sync_persists_volume_discounts(self):
+        listing = self.listing.__class__(
+            **{
+                **self.listing.__dict__,
+                "volume_discounts": (
+                    {"min_quantity": 2, "percent_off": "5"},
+                ),
+            }
+        )
+
+        sync_catalog(FakeClient([listing]))
+
+        self.assertEqual(
+            Product.objects.get(ebay_item_id=listing.item_id).volume_discounts,
+            [{"min_quantity": 2, "percent_off": "5"}],
+        )
+
+        sync_catalog(FakeClient([self.listing]))
+
+        self.assertEqual(
+            Product.objects.get(ebay_item_id=listing.item_id).volume_discounts, []
+        )
 
     def test_detail_failure_never_deactivates_or_partially_updates_catalog(self):
         existing = product("123456789012", title="Original")

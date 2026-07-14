@@ -296,6 +296,12 @@ def create_guest_order(
     }
     snapshots = []
     currencies = set()
+    pricing_quantities = {
+        product_id: sum(
+            line.quantity for line in lines if line.product_id == product_id
+        )
+        for product_id in products
+    }
     for line in lines:
         product = products.get(line.product_id)
         if product is None or not product.active or product.checkout_excluded:
@@ -309,11 +315,13 @@ def create_guest_order(
                 or not variant.purchasable
             ):
                 raise InventoryUnavailable("A selected product option is unavailable.")
-            price = variant.direct_price
+            price = product.direct_price_for(
+                pricing_quantities[product.pk], variant.price
+            )
         else:
             if active_variants:
                 raise InventoryUnavailable("A product option is required.")
-            price = product.direct_price
+            price = product.direct_price_for(pricing_quantities[product.pk])
         currencies.add(product.currency)
         image = product.images.first()
         snapshots.append((line, product, variant, price, image.url if image else ""))

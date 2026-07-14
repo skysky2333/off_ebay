@@ -16,13 +16,15 @@ class CartLine:
     product: Product
     variant: ProductVariant | None
     quantity: int
+    pricing_quantity: int
     fixed_unit_price: Decimal | None = None
 
     @property
     def unit_price(self):
         if self.fixed_unit_price is not None:
             return self.fixed_unit_price
-        return self.variant.direct_price if self.variant else self.product.direct_price
+        source_price = self.variant.price if self.variant else self.product.price
+        return self.product.direct_price_for(self.pricing_quantity, source_price)
 
     @property
     def available_quantity(self):
@@ -137,6 +139,14 @@ class Cart:
         }
         if len(valid_entries) != len(entries):
             self._save(valid_entries)
+        pricing_quantities = {
+            product_id: sum(
+                entry["quantity"]
+                for entry in valid_entries.values()
+                if entry["product_id"] == product_id
+            )
+            for product_id in product_ids
+        }
         lines = []
         for line_id, entry in valid_entries.items():
             product = products[entry["product_id"]]
@@ -147,6 +157,7 @@ class Cart:
                     product,
                     variant,
                     entry["quantity"],
+                    pricing_quantities[product.pk],
                     fixed_prices.get(line_id),
                 )
             )

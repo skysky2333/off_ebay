@@ -511,6 +511,64 @@ class StorefrontTests(TestCase):
             f'aria-label="Increase quantity for Camera lens" aria-controls="quantity-{line_id}" disabled',
         )
 
+    def test_volume_discount_is_reflected_from_product_page_through_checkout(self):
+        self.product.volume_discounts = [
+            {"min_quantity": 2, "percent_off": "5"}
+        ]
+        self.product.save(update_fields=("volume_discounts", "updated_at"))
+
+        detail = self.client.get(
+            reverse("storefront:product_detail", kwargs={"slug": self.product.slug})
+        )
+        self.client.post(
+            reverse("storefront:cart_add", kwargs={"slug": self.product.slug}),
+            {"quantity": "2"},
+        )
+        cart = self.client.get(reverse("storefront:cart"))
+        checkout = self.client.get(reverse("storefront:checkout"))
+
+        self.assertContains(detail, "Volume discounts")
+        self.assertContains(detail, "Buy 2+")
+        self.assertContains(detail, "$10.26 each")
+        self.assertEqual(cart.context["items"][0].unit_price, Decimal("10.26"))
+        self.assertEqual(cart.context["subtotal"], Decimal("20.52"))
+        self.assertContains(cart, "$10.26 each")
+        self.assertContains(checkout, "$20.52")
+
+    def test_volume_discount_combines_variants_from_the_same_listing(self):
+        self.product.quantity = 4
+        self.product.volume_discounts = [
+            {"min_quantity": 2, "percent_off": "5"}
+        ]
+        self.product.save(
+            update_fields=("quantity", "volume_discounts", "updated_at")
+        )
+        first = self.product.variants.create(
+            source_key="first",
+            sku="FIRST",
+            title="First option",
+            price=Decimal("12.00"),
+            quantity=2,
+        )
+        second = self.product.variants.create(
+            source_key="second",
+            sku="SECOND",
+            title="Second option",
+            price=Decimal("14.00"),
+            quantity=2,
+        )
+
+        self.add_product(first.pk)
+        self.add_product(second.pk)
+        cart = self.client.get(reverse("storefront:cart"))
+
+        prices = {
+            line.variant.pk: line.unit_price for line in cart.context["items"]
+        }
+        self.assertEqual(prices[first.pk], Decimal("10.26"))
+        self.assertEqual(prices[second.pk], Decimal("11.97"))
+        self.assertEqual(cart.context["subtotal"], Decimal("22.23"))
+
     def test_non_usd_product_never_enters_checkout(self):
         self.product.currency = "EUR"
         self.product.save(update_fields=("currency", "updated_at"))

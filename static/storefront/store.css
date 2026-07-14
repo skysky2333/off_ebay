@@ -960,6 +960,40 @@ button.product-card__action {
   font-size: 0.85rem;
 }
 
+.product-info__availability--with-volume {
+  margin-bottom: 16px;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.volume-pricing {
+  margin: 0 0 24px;
+  padding-bottom: 21px;
+  border-bottom: 1px solid var(--line);
+}
+
+.volume-pricing__heading {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.volume-pricing ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.volume-pricing li {
+  padding: 5px 0;
+  display: grid;
+  grid-template-columns: 70px minmax(110px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.84rem;
+}
+
 .purchase-form {
   display: grid;
   gap: 16px;

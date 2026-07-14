@@ -223,6 +223,13 @@ def product_detail(request, slug):
         and variant.purchasable
         and variant.available_quantity > 0
     ]
+    volume_prices = {"": product.display_volume_prices}
+    volume_prices.update(
+        {
+            str(variant.pk): product.volume_prices_for(variant.price)
+            for variant in variants
+        }
+    )
     return render(
         request,
         "catalog/product_detail.html",
@@ -230,6 +237,7 @@ def product_detail(request, slug):
             "product": product,
             "images": product.images.all(),
             "variants": variants,
+            "volume_prices": volume_prices,
             "variant_max_quantity": max(
                 (variant.available_quantity for variant in variants), default=0
             ),

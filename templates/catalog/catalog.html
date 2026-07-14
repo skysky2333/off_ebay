@@ -49,6 +49,7 @@
             <div class="product-card__body">
               <div class="product-card__meta">
                 <span>{{ product.condition|default:"Condition not specified" }}</span>
+                {% if product.volume_discounts %}<span>Volume discounts</span>{% endif %}
                 {% if product.available_quantity == 1 %}<span>Only one available</span>{% endif %}
               </div>
               <h2><a href="{% url 'storefront:product_detail' slug=product.slug %}">{{ product.title }}</a></h2>

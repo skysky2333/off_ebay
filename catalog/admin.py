@@ -101,6 +101,7 @@ class ProductAdmin(admin.ModelAdmin):
                     "category_id",
                     "item_specifics",
                     "shipping",
+                    "volume_discounts",
                     "ebay_started_at",
                     "ebay_ends_at",
                     "created_at",

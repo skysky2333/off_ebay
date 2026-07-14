@@ -167,7 +167,9 @@ class PayPalSpy:
         return self.signature_valid
 
 
-def ebay_listing(product, price, currency, quantity, variations=()):
+def ebay_listing(
+    product, price, currency, quantity, variations=(), volume_discounts=()
+):
     return SimpleNamespace(
         item_id=product.ebay_item_id,
         title=product.title,
@@ -187,6 +189,7 @@ def ebay_listing(product, price, currency, quantity, variations=()):
         ends_at=product.ebay_ends_at,
         images=(),
         variations=variations,
+        volume_discounts=volume_discounts,
     )
 
 
@@ -267,6 +270,63 @@ class OrderServiceTests(TestCase):
 
         self.assertEqual(order.subtotal, Decimal("14.40"))
         self.assertEqual(order.total, Decimal("17.40"))
+
+    def test_checkout_applies_the_qualifying_volume_discount(self):
+        self.product.volume_discounts = [
+            {"min_quantity": 2, "percent_off": "10"}
+        ]
+        self.product.save(update_fields=("volume_discounts", "updated_at"))
+
+        order = self.create_order(expected_total=Decimal("12.72"))
+
+        self.assertEqual(order.items.get().unit_price, Decimal("4.86"))
+        self.assertEqual(order.subtotal, Decimal("9.72"))
+
+    def test_checkout_combines_variants_for_volume_pricing(self):
+        self.product.volume_discounts = [
+            {"min_quantity": 2, "percent_off": "5"}
+        ]
+        self.product.save(update_fields=("volume_discounts", "updated_at"))
+        first = self.product.variants.create(
+            source_key="first",
+            sku="FIRST",
+            title="First option",
+            price=Decimal("6.00"),
+            quantity=2,
+        )
+        second = self.product.variants.create(
+            source_key="second",
+            sku="SECOND",
+            title="Second option",
+            price=Decimal("8.00"),
+            quantity=2,
+        )
+        lines = [
+            CheckoutLine(
+                product_id=self.product.pk, variant_id=first.pk, quantity=1
+            ),
+            CheckoutLine(
+                product_id=self.product.pk, variant_id=second.pk, quantity=1
+            ),
+        ]
+
+        order = create_guest_order(
+            checkout_key=uuid.uuid4(),
+            email="ada@example.com",
+            address=self.address,
+            lines=lines,
+            shipping_total=Decimal("3.00"),
+            expected_total=Decimal("14.97"),
+            inventory=self.inventory,
+        )
+
+        prices = {
+            item.variant_id: item.unit_price for item in order.items.all()
+        }
+        self.assertEqual(
+            prices, {first.pk: Decimal("5.13"), second.pk: Decimal("6.84")}
+        )
+        self.assertEqual(order.subtotal, Decimal("11.97"))
 
     def test_local_reservations_prevent_overbooking(self):
         line = CheckoutLine(product_id=self.product.pk, quantity=3)
@@ -1003,6 +1063,7 @@ class OrderServiceTests(TestCase):
                     currency="USD",
                     quantity=type(self).quantity,
                     variations=(),
+                    volume_discounts=(),
                 )
 
             def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
@@ -1284,6 +1345,55 @@ class OrderServiceTests(TestCase):
         self.assertEqual(order.status, Order.Status.CANCELLED)
         self.assertEqual(paypal.capture_calls, 0)
         self.assertEqual(self.product.price, Decimal("8.00"))
+        self.assertFalse(InventoryOperation.objects.exists())
+
+    def test_capture_rechecks_volume_discount_at_inventory_write_boundary(self):
+        original_discounts = ({"min_quantity": 2, "percent_off": "10"},)
+        changed_discounts = ({"min_quantity": 2, "percent_off": "5"},)
+        self.product.volume_discounts = list(original_discounts)
+        self.product.save(update_fields=("volume_discounts", "updated_at"))
+        order = self.create_order(expected_total=Decimal("12.72"))
+        paypal = PayPalSpy()
+        create_paypal_checkout(order.pk, "https://a", "https://b", paypal)
+        listings = [
+            ebay_listing(
+                self.product,
+                Decimal("6.00"),
+                "USD",
+                5,
+                volume_discounts=original_discounts,
+            ),
+            ebay_listing(
+                self.product,
+                Decimal("6.00"),
+                "USD",
+                5,
+                volume_discounts=changed_discounts,
+            ),
+        ]
+
+        class RacingDiscountClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exception_type, exception, traceback):
+                return False
+
+            def get_item(self, item_id):
+                return listings.pop(0)
+
+            def revise_inventory_status(self, *args):
+                raise AssertionError("A changed quote must not reduce inventory")
+
+        with patch("catalog.inventory.EbayTradingClient", RacingDiscountClient):
+            with self.assertRaisesMessage(EbayInventoryConflict, "price"):
+                capture_paypal_order(order.pk, paypal, EbayInventoryGateway())
+
+        order.refresh_from_db()
+        self.product.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+        self.assertEqual(paypal.capture_calls, 0)
+        self.assertEqual(self.product.volume_discounts, list(changed_discounts))
         self.assertFalse(InventoryOperation.objects.exists())
 
     def test_capture_rechecks_listing_status_at_inventory_write_boundary(self):

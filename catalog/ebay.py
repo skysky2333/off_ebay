@@ -112,6 +112,7 @@ class EbayListing:
     ends_at: object
     images: tuple
     variations: tuple
+    volume_discounts: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,35 @@ def _shipping(item):
         "country": _text(item, "e:Country"),
         "postal_code": _text(item, "e:PostalCode"),
     }
+
+
+def _volume_discounts(item):
+    discounts = []
+    minimums = set()
+    for discount in item.findall("e:ItemDiscounts/e:ItemDiscount", NS):
+        minimum_text = _required_text(discount, "e:MinItemCount")
+        if not minimum_text.isascii() or not minimum_text.isdigit():
+            raise EbayResponseError("eBay response has invalid volume discount quantity")
+        minimum = int(minimum_text)
+        if minimum < 2 or minimum in minimums:
+            raise EbayResponseError("eBay response has invalid volume discount quantity")
+        minimums.add(minimum)
+
+        percent_text = _required_text(discount, "e:PercentOff")
+        try:
+            percent = Decimal(percent_text)
+        except InvalidOperation as error:
+            raise EbayResponseError(
+                "eBay response has invalid volume discount percentage"
+            ) from error
+        if not percent.is_finite() or percent <= 0 or percent >= 100:
+            raise EbayResponseError(
+                "eBay response has invalid volume discount percentage"
+            )
+        discounts.append(
+            {"min_quantity": minimum, "percent_off": format(percent, "f")}
+        )
+    return tuple(sorted(discounts, key=lambda tier: tier["min_quantity"]))
 
 
 def _https_url(url, kind):
@@ -356,6 +386,7 @@ def parse_listing(response):
         ends_at=_date(item, "e:ListingDetails/e:EndTime"),
         images=_images(item),
         variations=variations,
+        volume_discounts=_volume_discounts(item),
     )
 
 

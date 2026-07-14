@@ -32,6 +32,12 @@ def _listing_price(listing, variant):
     return _listing_variant(listing, variant).price
 
 
+def _pricing_quantity(item):
+    return item.order.items.filter(product_id=item.product_id).aggregate(
+        total=Sum("quantity")
+    )["total"]
+
+
 class EbayInventoryGateway:
     @transaction.atomic
     def reserve(self, reservation):
@@ -91,6 +97,7 @@ class EbayInventoryGateway:
         if item.product is None or (item.variation_sku and item.variant is None):
             raise InventoryUnavailable("The catalog source for this item is unavailable.")
         key = f"sale-{reservation.pk}"
+        pricing_quantity = _pricing_quantity(item)
         operation = InventoryOperation.objects.filter(idempotency_key=key).first()
         if operation is None and not Product.objects.filter(
             pk=item.product_id, active=True, checkout_excluded=False
@@ -116,7 +123,11 @@ class EbayInventoryGateway:
                     raise InventoryUnavailable(f"{item.title} is no longer available.")
                 if (
                     listing.currency != item.order.currency
-                    or direct_price(_listing_price(listing, item.variant))
+                    or direct_price(
+                        _listing_price(listing, item.variant),
+                        pricing_quantity,
+                        listing.volume_discounts,
+                    )
                     != item.unit_price
                 ):
                     sync_listing(listing, timezone.now())
@@ -141,6 +152,7 @@ class EbayInventoryGateway:
                 idempotency_key=key,
                 expected_currency=item.order.currency,
                 expected_price=item.unit_price,
+                price_quantity=pricing_quantity,
             )
 
     def release(self, reservation):

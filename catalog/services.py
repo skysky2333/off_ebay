@@ -185,6 +185,7 @@ def sync_listing(listing, observed_at):
         "category_name": listing.category_name,
         "item_specifics": listing.item_specifics,
         "shipping": listing.shipping,
+        "volume_discounts": listing.volume_discounts,
         "listing_url": listing.listing_url,
         "listing_type": listing.listing_type,
         "quantity": listing.quantity,
@@ -325,9 +326,12 @@ def set_inventory_quantity(
     variant=None,
     expected_currency=None,
     expected_price=None,
+    price_quantity=1,
 ):
     if (expected_currency is None) != (expected_price is None):
         raise ValueError("Expected currency and price must be provided together")
+    if price_quantity < 1:
+        raise ValueError("Price quantity must be positive")
     if variant is not None and variant.product_id != product.id:
         raise ValueError("Variant does not belong to product")
     operation, created = InventoryOperation.objects.get_or_create(
@@ -389,7 +393,13 @@ def set_inventory_quantity(
             listing_variant = None
             current_quantity = listing.quantity
             current_price = (
-                direct_price(listing.price) if expected_price is not None else None
+                direct_price(
+                    listing.price,
+                    price_quantity,
+                    listing.volume_discounts,
+                )
+                if expected_price is not None
+                else None
             )
         else:
             listing_variant = None
@@ -412,7 +422,11 @@ def set_inventory_quantity(
                 listing_variant = matches[0]
                 current_quantity = listing_variant.quantity
                 current_price = (
-                    direct_price(listing_variant.price)
+                    direct_price(
+                        listing_variant.price,
+                        price_quantity,
+                        listing.volume_discounts,
+                    )
                     if expected_price is not None
                     else None
                 )

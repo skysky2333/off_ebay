@@ -48,9 +48,24 @@
             <p class="product-info__price price"><span data-price-prefix>{% if variants %}From {% endif %}</span><span class="price-label">Direct</span> $<span data-product-price>{{ product.display_direct_price|floatformat:2 }}</span></p>
             <p class="ebay-price"><span class="price-label">eBay</span> <s>$<span data-ebay-price>{{ product.display_price|floatformat:2 }}</span></s></p>
           </div>
-          <p class="product-info__availability">
+          <p class="product-info__availability{% if product.volume_discounts %} product-info__availability--with-volume{% endif %}">
             {% if product.available_quantity == 1 %}Only one available{% else %}{{ product.available_quantity }} available{% endif %}
           </p>
+
+          {% if product.volume_discounts %}
+            <div class="volume-pricing" aria-labelledby="volume-pricing-heading">
+              <p id="volume-pricing-heading" class="volume-pricing__heading">Volume discounts</p>
+              <ul>
+                {% for tier in product.display_volume_prices %}
+                  <li>
+                    <span>Buy {{ tier.min_quantity }}+</span>
+                    <strong>{% if variants %}From {% endif %}${{ tier.direct_price|floatformat:2 }} each</strong>
+                    <span class="muted">{{ tier.percent_off }}% eBay discount included</span>
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
 
           {% if checkout_enabled %}
             <form id="purchase" class="purchase-form" method="post" action="{% url 'storefront:cart_add' slug=product.slug %}">
@@ -75,6 +90,7 @@
               </div>
               <p class="policy-note">Ships within the United States. All sales are final.</p>
             </form>
+            {{ volume_prices|json_script:"volume-prices" }}
           {% else %}
             <div class="paypal-message" role="status">Ordering is currently paused.</div>
           {% endif %}

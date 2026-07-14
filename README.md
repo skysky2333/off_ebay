@@ -9,6 +9,7 @@ Off-Ebay is not affiliated with or endorsed by eBay, PayPal, Pirate Ship, or Clo
 ## What It Does
 
 - Imports supported active fixed-price eBay listings, including variations without seller-defined SKUs, descriptions, photos, condition, price, and available quantity.
+- Synchronizes eBay multi-quantity discount tiers and reflects the qualifying tier throughout direct pricing.
 - Shows the original eBay price, the configured direct price, and a link to the corresponding eBay listing.
 - Rechecks the current eBay listing and reduces eBay inventory before PayPal captures payment.
 - Uses server-calculated, immutable order totals; browser-submitted prices are never trusted.
@@ -40,7 +41,7 @@ The storefront images below use live synchronized product listings. The populate
 | `db` | PostgreSQL catalog, orders, reservations, provider references, and audit history |
 | `proxy` | Optional Caddy HTTPS endpoint; do not start it when using Cloudflare Tunnel |
 
-eBay remains the merchandising source of truth. Edit listing titles, descriptions, photos, source prices, variations, and quantities on eBay. Off-Ebay applies `DIRECT_DISCOUNT_PERCENT` to each synchronized eBay unit price, rounds to cents, and never overwrites the source price.
+eBay remains the merchandising source of truth. Edit listing titles, descriptions, photos, source prices, variations, quantities, and multi-quantity discounts on eBay. Off-Ebay first applies the qualifying eBay quantity tier, then applies `DIRECT_DISCOUNT_PERCENT` to that discounted unit price, rounds each unit price to cents, and never overwrites the source price.
 
 The application supports one configured eBay seller account per deployment. It is not a multi-vendor marketplace.
 
@@ -328,6 +329,7 @@ curl -fsS https://YOUR_DOMAIN/health/
 - A known eBay quantity or price edit appears after a manual sync.
 - Admin shows checkout enabled and the intended flat shipping amount.
 - The cart and checkout show the discounted totals and `$0.00` tax.
+- Crossing a multi-quantity tier updates the eBay comparison and direct totals consistently, including quantities combined across listing options.
 - A small live purchase completes only after eBay inventory is reduced.
 - The private order-status link opens and remains unguessable.
 - PayPal receives the order details needed by Pirate Ship.

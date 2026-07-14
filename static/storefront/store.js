@@ -71,24 +71,57 @@ for (const stepper of document.querySelectorAll("[data-quantity-stepper]")) {
 }
 
 const variantSelector = document.querySelector("[data-variant-selector]");
+const productQuantity = document.querySelector("[data-product-quantity]");
 
-if (variantSelector) {
+if (productQuantity) {
   const directPrice = document.querySelector("[data-product-price]");
   const ebayPrice = document.querySelector("[data-ebay-price]");
   const prefix = document.querySelector("[data-price-prefix]");
-  const quantity = document.querySelector("[data-product-quantity]");
+  const volumePrices = JSON.parse(
+    document.querySelector("#volume-prices").textContent,
+  );
   const initialDirectPrice = directPrice.textContent;
   const initialEbayPrice = ebayPrice.textContent;
   const initialPrefix = prefix.textContent;
-  const initialMaximum = quantity.max;
-  variantSelector.addEventListener("change", () => {
-    const option = variantSelector.selectedOptions[0];
-    directPrice.textContent = option.dataset.directPrice || initialDirectPrice;
-    ebayPrice.textContent = option.dataset.ebayPrice || initialEbayPrice;
-    prefix.textContent = option.dataset.directPrice ? "" : initialPrefix;
-    quantity.max = option.dataset.quantity || initialMaximum;
-    if (Number(quantity.value) > Number(quantity.max)) quantity.value = quantity.max;
-  });
+  const initialMaximum = productQuantity.max;
+
+  const syncProductPrice = () => {
+    const option = variantSelector?.selectedOptions[0];
+    const sourcePrice = option?.dataset.ebayPrice || initialEbayPrice;
+    const baseDirectPrice = option?.dataset.directPrice || initialDirectPrice;
+    const quantity = Number(productQuantity.value);
+    const tiers = volumePrices[option?.value || ""];
+    let qualifyingTier = null;
+    let minimum = 0;
+    for (const tier of tiers) {
+      const tierMinimum = Number(tier.min_quantity);
+      if (quantity >= tierMinimum && tierMinimum > minimum) {
+        minimum = tierMinimum;
+        qualifyingTier = tier;
+      }
+    }
+    if (qualifyingTier) {
+      ebayPrice.textContent = qualifyingTier.ebay_price;
+      directPrice.textContent = qualifyingTier.direct_price;
+    } else {
+      ebayPrice.textContent = sourcePrice;
+      directPrice.textContent = baseDirectPrice;
+    }
+    prefix.textContent = option?.dataset.directPrice ? "" : initialPrefix;
+  };
+
+  if (variantSelector) {
+    variantSelector.addEventListener("change", () => {
+      const option = variantSelector.selectedOptions[0];
+      productQuantity.max = option.dataset.quantity || initialMaximum;
+      if (Number(productQuantity.value) > Number(productQuantity.max)) {
+        productQuantity.value = productQuantity.max;
+      }
+      syncProductPrice();
+    });
+  }
+  productQuantity.addEventListener("input", syncProductPrice);
+  productQuantity.addEventListener("change", syncProductPrice);
 }
 
 const paypalCheckout = document.querySelector("[data-paypal-checkout]");

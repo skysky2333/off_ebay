@@ -3,6 +3,7 @@ from django.db.models import Exists, F, OuterRef, Q, Sum, Value
 from django.db.models.functions import Coalesce
 
 from .pricing import direct_price as calculate_direct_price
+from .pricing import ebay_price as calculate_ebay_price
 
 
 HELD_RESERVATION_STATUSES = ("reserved", "committing")
@@ -113,6 +114,7 @@ class Product(models.Model):
     category_name = models.CharField(max_length=255, blank=True)
     item_specifics = models.JSONField(default=dict)
     shipping = models.JSONField(default=dict)
+    volume_discounts = models.JSONField(default=list)
     listing_url = models.URLField(max_length=500)
     listing_type = models.CharField(max_length=40)
     quantity = models.PositiveIntegerField(default=0)
@@ -182,11 +184,41 @@ class Product(models.Model):
 
     @property
     def direct_price(self):
-        return calculate_direct_price(self.price)
+        return self.direct_price_for(1)
+
+    def ebay_price_for(self, quantity, source_price=None):
+        return calculate_ebay_price(
+            self.price if source_price is None else source_price,
+            quantity,
+            self.volume_discounts,
+        )
+
+    def direct_price_for(self, quantity, source_price=None):
+        return calculate_direct_price(
+            self.price if source_price is None else source_price,
+            quantity,
+            self.volume_discounts,
+        )
 
     @property
     def display_direct_price(self):
-        return calculate_direct_price(self.display_price)
+        return self.direct_price_for(1, self.display_price)
+
+    def volume_prices_for(self, source_price):
+        return [
+            {
+                **tier,
+                "ebay_price": self.ebay_price_for(tier["min_quantity"], source_price),
+                "direct_price": self.direct_price_for(
+                    tier["min_quantity"], source_price
+                ),
+            }
+            for tier in self.volume_discounts
+        ]
+
+    @property
+    def display_volume_prices(self):
+        return self.volume_prices_for(self.display_price)
 
     @property
     def has_active_variants(self):
