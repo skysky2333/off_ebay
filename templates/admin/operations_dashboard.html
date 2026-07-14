@@ -12,7 +12,7 @@
     {% endif %}
   </header>
 
-  {% if can_view_store or can_view_orders or can_view_inventory or can_view_refunds %}<div class="operations-metrics">
+  {% if can_view_store or can_view_orders or can_view_inventory or can_view_refunds or can_view_paypal_cases %}<div class="operations-metrics">
     {% if can_view_store %}
       <a class="operations-metric" data-state="{% if checkout_is_enabled %}clear{% else %}attention{% endif %}" href="{{ store_settings_url }}">
         <span>Checkout</span>
@@ -40,6 +40,13 @@
         <span>Refund review</span>
         <strong>{{ refund_review_count }}</strong>
         {% if failed_refund_count %}<small>{{ failed_refund_count }} unsuccessful</small>{% endif %}
+      </a>
+    {% endif %}
+    {% if can_view_paypal_cases %}
+      <a class="operations-metric" data-state="{% if urgent_paypal_case_count %}danger{% elif paypal_case_review_count %}attention{% else %}clear{% endif %}" href="{% url 'admin:orders_paypalcase_changelist' %}?case_review=needed">
+        <span>PayPal case review</span>
+        <strong>{{ paypal_case_review_count }}</strong>
+        {% if urgent_paypal_case_count %}<small>{{ urgent_paypal_case_count }} urgent</small>{% endif %}
       </a>
     {% endif %}
   </div>{% endif %}

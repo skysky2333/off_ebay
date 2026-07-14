@@ -17,7 +17,7 @@
             <div class="gallery__stage">
               <span class="image-placeholder" aria-hidden="true">Image unavailable</span>
               {% if primary_image %}
-                <a class="gallery__stage-link" href="{{ primary_image.url }}" aria-label="Open full-size image 1" data-gallery-link>
+                <a class="gallery__stage-link" href="{{ primary_image.url }}" aria-label="Open full-size image 1" data-gallery-link data-image-src="{{ primary_image.url }}" data-image-alt="{{ product.title }}, image 1">
                   <img src="{{ primary_image.url }}" alt="{{ product.title }}, image 1" data-gallery-image onerror="this.parentElement.hidden=true">
                 </a>
               {% endif %}
@@ -34,6 +34,13 @@
           {% endif %}
         </div>
 
+        {% if images %}
+          <dialog class="image-viewer" aria-label="Full-size product image" data-image-viewer>
+            <button class="image-viewer__close" type="button" aria-label="Close full-size image" title="Close" data-image-viewer-close>&times;</button>
+            <img class="image-viewer__image" alt="" data-image-viewer-image>
+          </dialog>
+        {% endif %}
+
         <div class="product-info">
           {% if product.condition %}<p class="eyebrow">{{ product.condition }}</p>{% endif %}
           <h1>{{ product.title }}</h1>
@@ -46,7 +53,7 @@
           </p>
 
           {% if checkout_enabled %}
-            <form class="purchase-form" method="post" action="{% url 'storefront:cart_add' slug=product.slug %}">
+            <form id="purchase" class="purchase-form" method="post" action="{% url 'storefront:cart_add' slug=product.slug %}">
               {% csrf_token %}
               {% if variants %}
                 <div class="field">

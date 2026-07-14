@@ -4,14 +4,24 @@ from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.core.exceptions import PermissionDenied
 from django.template.response import TemplateResponse
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import format_html
 
-from .models import InventoryReservation, Order, OrderEvent, OrderItem, Refund, Shipment
-from .paypal import PayPalClient
+from .models import (
+    InventoryReservation,
+    Order,
+    OrderEvent,
+    OrderItem,
+    PayPalCase,
+    Refund,
+    Shipment,
+)
+from .paypal import PayPalClient, PayPalRefundError
 from .services import (
     SHIPPABLE_ORDER_STATUSES,
     orders_accepting_shipments,
     orders_needing_fulfillment,
+    paypal_cases_needing_review,
     record_manual_shipment,
     refund_order,
     refunds_needing_review,
@@ -63,6 +73,19 @@ class RefundReviewFilter(admin.SimpleListFilter):
         return queryset
 
 
+class PayPalCaseReviewFilter(admin.SimpleListFilter):
+    title = "case review"
+    parameter_name = "case_review"
+
+    def lookups(self, request, model_admin):
+        return (("needed", "Needs review"),)
+
+    def queryset(self, request, queryset):
+        if self.value() == "needed":
+            return paypal_cases_needing_review(queryset)
+        return queryset
+
+
 class ShipmentAdminForm(forms.ModelForm):
     class Meta:
         model = Shipment
@@ -89,6 +112,14 @@ class ShipmentAdminForm(forms.ModelForm):
         ):
             raise forms.ValidationError(
                 "Orders with a pending refund cannot receive a new shipment."
+            )
+        if (
+            order
+            and not self.instance.pk
+            and order.paypal_cases.filter(needs_review=True).exists()
+        ):
+            raise forms.ValidationError(
+                "Orders with an unreviewed PayPal case cannot receive a new shipment."
             )
         return cleaned_data
 
@@ -142,6 +173,25 @@ class OrderEventInline(admin.TabularInline):
     extra = 0
     can_delete = False
     fields = ("created_at", "kind", "source", "data")
+    readonly_fields = fields
+    classes = ("collapse",)
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class PayPalCaseInline(admin.TabularInline):
+    model = PayPalCase
+    extra = 0
+    can_delete = False
+    fields = (
+        "kind",
+        "paypal_case_id",
+        "status",
+        "amount",
+        "needs_review",
+        "provider_updated_at",
+    )
     readonly_fields = fields
     classes = ("collapse",)
 
@@ -272,7 +322,12 @@ class OrderAdmin(admin.ModelAdmin):
             },
         ),
     )
-    inlines = (OrderItemInline, ShipmentInline, OrderEventInline)
+    inlines = (
+        OrderItemInline,
+        ShipmentInline,
+        PayPalCaseInline,
+        OrderEventInline,
+    )
     actions = ("refund_one_order",)
 
     def get_fieldsets(self, request, obj=None):
@@ -304,6 +359,8 @@ class OrderAdmin(admin.ModelAdmin):
             )
         if order.refunds.filter(status=Refund.Status.PENDING).exists():
             return "Unavailable while a refund is pending"
+        if order.paypal_cases.filter(needs_review=True).exists():
+            return "Unavailable while a PayPal case needs review"
         url = reverse("admin:orders_shipment_add")
         return format_html(
             '<a class="button" href="{}?order={}">Add shipment</a>', url, order.pk
@@ -327,6 +384,13 @@ class OrderAdmin(admin.ModelAdmin):
                 request, "Only captured orders can be refunded.", level=messages.ERROR
             )
             return None
+        if order.paypal_cases.filter(needs_review=True).exists():
+            self.message_user(
+                request,
+                "Review the open PayPal case before refunding this order.",
+                level=messages.ERROR,
+            )
+            return None
         amount = order.total - order.refunded_total
         if order.status == Order.Status.REFUNDED or amount <= 0:
             self.message_user(
@@ -346,8 +410,16 @@ class OrderAdmin(admin.ModelAdmin):
                     "action_checkbox_name": ACTION_CHECKBOX_NAME,
                 },
             )
-        with PayPalClient() as client:
-            order = refund_order(order.pk, client)
+        try:
+            with PayPalClient() as client:
+                order = refund_order(order.pk, client)
+        except PayPalRefundError as error:
+            self.message_user(
+                request,
+                f"Refund request for {order.reference} was not completed: {error}",
+                level=messages.ERROR,
+            )
+            return None
         refund = Refund.objects.get(paypal_refund_id=order.paypal_refund_id)
         if refund.status == Refund.Status.COMPLETED:
             self.message_user(
@@ -499,6 +571,71 @@ class RefundAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
         "created_at",
         "updated_at",
     )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PayPalCase)
+class PayPalCaseAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "paypal_case_id",
+        "order_link",
+        "kind",
+        "status",
+        "amount_display",
+        "needs_review",
+        "provider_updated_at",
+    )
+    list_filter = (PayPalCaseReviewFilter, "kind", "status", "reason")
+    search_fields = (
+        "paypal_case_id",
+        "order__reference",
+        "order__paypal_capture_id",
+    )
+    readonly_fields = (
+        "order_link",
+        "kind",
+        "paypal_case_id",
+        "status",
+        "reason",
+        "outcome",
+        "stage",
+        "channel",
+        "amount",
+        "currency",
+        "seller_response_due_at",
+        "provider_created_at",
+        "provider_updated_at",
+        "last_event_type",
+        "needs_review",
+        "reviewed_at",
+        "created_at",
+        "updated_at",
+    )
+    actions = ("mark_reviewed",)
+
+    @admin.display(description="Order")
+    def order_link(self, case):
+        url = reverse("admin:orders_order_change", args=[case.order_id])
+        return format_html('<a href="{}">{}</a>', url, case.order.reference)
+
+    @admin.display(description="Amount")
+    def amount_display(self, case):
+        return f"{case.currency} {case.amount:.2f}"
+
+    @admin.action(description="Mark selected PayPal cases reviewed")
+    def mark_reviewed(self, request, queryset):
+        now = timezone.now()
+        reviewed = queryset.filter(needs_review=True).update(
+            needs_review=False,
+            reviewed_at=now,
+            updated_at=now,
+        )
+        self.message_user(request, f"Marked {reviewed} PayPal case(s) reviewed.")
 
     def has_add_permission(self, request):
         return False

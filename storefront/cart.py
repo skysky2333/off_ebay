@@ -41,7 +41,6 @@ class CartLine:
                 self.variant is None
                 or not self.variant.active
                 or not self.variant.purchasable
-                or not self.variant.sku
             ):
                 return 0
             return self.variant.available_quantity
@@ -161,7 +160,6 @@ class Cart:
                 variant.product_id != product.pk
                 or not variant.active
                 or not variant.purchasable
-                or not variant.sku
             ):
                 raise ValueError("This product option is unavailable.")
             available = variant.available_quantity

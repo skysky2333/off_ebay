@@ -11,7 +11,8 @@ from django.test import RequestFactory, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import InventoryReservation, Order, OrderEvent, Refund, Shipment
+from .models import InventoryReservation, Order, OrderEvent, PayPalCase, Refund, Shipment
+from .paypal import PayPalRefundError
 from .services import OrderStateError, orders_needing_fulfillment, record_manual_shipment
 
 
@@ -32,6 +33,14 @@ class PayPalAdminDouble:
             "status": type(self).status,
             "amount": {"currency_code": currency, "value": amount},
         }
+
+
+class PayPalRejectingAdminDouble(PayPalAdminDouble):
+    def refund_capture(self, capture_id, amount, currency, invoice_id, request_id):
+        raise PayPalRefundError(
+            "This capture cannot be refunded (REFUND_NOT_ALLOWED). "
+            "PayPal debug ID: DEBUG-REFUND-1."
+        )
 
 
 class OrderAdminTests(TestCase):
@@ -446,6 +455,28 @@ class OrderAdminTests(TestCase):
         self.assertEqual(order.status, Order.Status.REFUNDED)
         self.assertEqual(order.refunded_total, order.total)
 
+    @patch("orders.admin.PayPalClient", PayPalRejectingAdminDouble)
+    def test_refund_provider_rejection_is_reported_without_server_error(self):
+        order = self.order(Order.Status.PAID, captured=True)
+
+        response = self.client.post(
+            reverse("admin:orders_order_changelist"),
+            self.action_data(order, confirmed=True),
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f"Refund request for {order.reference} was not completed",
+        )
+        self.assertContains(response, "REFUND_NOT_ALLOWED")
+        self.assertContains(response, "PayPal debug ID: DEBUG-REFUND-1")
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(order.refunded_total, Decimal("0.00"))
+        self.assertFalse(order.refunds.exists())
+
     @patch("orders.admin.PayPalClient", PayPalAdminDouble)
     def test_pending_refund_is_reported_without_claiming_completion(self):
         order = self.order(Order.Status.PAID, captured=True)
@@ -462,3 +493,66 @@ class OrderAdminTests(TestCase):
         self.assertEqual(Refund.objects.get().status, Refund.Status.PENDING)
         order.refresh_from_db()
         self.assertEqual(order.refunded_total, Decimal("0.00"))
+
+    @patch("orders.admin.PayPalClient", PayPalAdminDouble)
+    def test_paypal_case_review_queue_blocks_actions_until_acknowledged(self):
+        order = self.order(Order.Status.PAID, captured=True)
+        case = PayPalCase.objects.create(
+            order=order,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id="PP-D-ADMIN-1",
+            status=PayPalCase.Status.WAITING_FOR_SELLER_RESPONSE,
+            reason="ITEM_NOT_RECEIVED",
+            stage="INQUIRY",
+            amount=Decimal("10.00"),
+            currency="USD",
+            last_event_type="CUSTOMER.DISPUTE.CREATED",
+            provider_updated_at=timezone.now(),
+        )
+        case_url = reverse("admin:orders_paypalcase_changelist")
+
+        order_page = self.client.get(
+            reverse("admin:orders_order_change", args=[order.pk])
+        )
+        refund_response = self.client.post(
+            reverse("admin:orders_order_changelist"),
+            self.action_data(order, confirmed=True),
+            follow=True,
+        )
+        queue = self.client.get(case_url, {"case_review": "needed"})
+
+        self.assertContains(
+            order_page, "Unavailable while a PayPal case needs review"
+        )
+        self.assertContains(order_page, "PP-D-ADMIN-1")
+        self.assertContains(
+            refund_response,
+            "Review the open PayPal case before refunding this order.",
+        )
+        self.assertEqual(PayPalAdminDouble.calls, [])
+        self.assertFalse(
+            orders_needing_fulfillment().filter(pk=order.pk).exists()
+        )
+        self.assertContains(queue, "PP-D-ADMIN-1")
+
+        reviewed = self.client.post(
+            case_url,
+            {
+                "action": "mark_reviewed",
+                ACTION_CHECKBOX_NAME: [str(case.pk)],
+                "select_across": "0",
+            },
+            follow=True,
+        )
+
+        self.assertContains(reviewed, "Marked 1 PayPal case(s) reviewed.")
+        case.refresh_from_db()
+        self.assertFalse(case.needs_review)
+        self.assertIsNotNone(case.reviewed_at)
+        self.assertTrue(
+            orders_needing_fulfillment().filter(pk=order.pk).exists()
+        )
+        refreshed_order_page = self.client.get(
+            reverse("admin:orders_order_change", args=[order.pk])
+        )
+        self.assertContains(refreshed_order_page, "Add shipment")

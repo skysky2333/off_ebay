@@ -15,11 +15,12 @@ from catalog.inventory import EbayInventoryGateway
 from catalog.models import InventoryOperation, Product
 
 from .inventory import InventoryUnavailable
-from .models import InventoryReservation, Order, OrderEvent, Refund, Shipment
-from .paypal import PayPalClient, PayPalInstrumentDeclined
+from .models import InventoryReservation, Order, OrderEvent, PayPalCase, Refund, Shipment
+from .paypal import PayPalClient, PayPalInstrumentDeclined, PayPalRefundError
 from .services import (
     CheckoutLine,
     IdempotencyConflict,
+    OrderStateError,
     PaymentDataError,
     ShippingAddress,
     WebhookVerificationError,
@@ -633,6 +634,196 @@ class OrderServiceTests(TestCase):
             OrderEvent.objects.filter(event_key="paypal-webhook:WH-1").count(), 1
         )
 
+    def test_dispute_webhooks_reopen_review_and_ignore_stale_updates(self):
+        order = self.create_order()
+        paypal = PayPalSpy()
+        create_paypal_checkout(order.pk, "https://a", "https://b", paypal)
+        capture_paypal_order(order.pk, paypal, self.inventory)
+        order.refresh_from_db()
+        committed_count = len(self.inventory.committed)
+        resource = {
+            "dispute_id": "PP-D-STORE-1",
+            "disputed_transactions": [
+                {"seller_transaction_id": order.paypal_capture_id}
+            ],
+            "reason": "ITEM_NOT_RECEIVED",
+            "status": "WAITING_FOR_SELLER_RESPONSE",
+            "dispute_amount": {"currency_code": "USD", "value": "5.00"},
+            "dispute_life_cycle_stage": "INQUIRY",
+            "dispute_channel": "INTERNAL",
+            "seller_response_due_date": "2026-07-20T12:00:00Z",
+            "create_time": "2026-07-14T00:00:00Z",
+            "update_time": "2026-07-14T01:00:00Z",
+        }
+
+        process_paypal_webhook(
+            {},
+            {
+                "id": "WH-DISPUTE-CREATED",
+                "event_type": "CUSTOMER.DISPUTE.CREATED",
+                "resource": resource,
+            },
+            paypal,
+            self.inventory,
+        )
+
+        case = order.paypal_cases.get()
+        self.assertEqual(case.kind, PayPalCase.Kind.DISPUTE)
+        self.assertEqual(case.status, PayPalCase.Status.WAITING_FOR_SELLER_RESPONSE)
+        self.assertEqual(case.reason, "ITEM_NOT_RECEIVED")
+        self.assertEqual(case.amount, Decimal("5.00"))
+        self.assertTrue(case.needs_review)
+        self.assertEqual(
+            case.seller_response_due_at.isoformat(),
+            "2026-07-20T12:00:00+00:00",
+        )
+
+        case.needs_review = False
+        case.reviewed_at = timezone.now()
+        case.save(update_fields=("needs_review", "reviewed_at", "updated_at"))
+        process_paypal_webhook(
+            {},
+            {
+                "id": "WH-DISPUTE-UPDATED",
+                "event_type": "CUSTOMER.DISPUTE.UPDATED",
+                "resource": {
+                    **resource,
+                    "status": "UNDER_REVIEW",
+                    "update_time": "2026-07-14T02:00:00Z",
+                },
+            },
+            paypal,
+            self.inventory,
+        )
+
+        case.refresh_from_db()
+        self.assertEqual(case.status, PayPalCase.Status.UNDER_REVIEW)
+        self.assertTrue(case.needs_review)
+        self.assertIsNone(case.reviewed_at)
+
+        process_paypal_webhook(
+            {},
+            {
+                "id": "WH-DISPUTE-STALE",
+                "event_type": "CUSTOMER.DISPUTE.UPDATED",
+                "resource": {
+                    **resource,
+                    "status": "OPEN",
+                    "update_time": "2026-07-14T00:30:00Z",
+                },
+            },
+            paypal,
+            self.inventory,
+        )
+        case.refresh_from_db()
+        self.assertEqual(case.status, PayPalCase.Status.UNDER_REVIEW)
+
+        resolved_event = {
+            "id": "WH-DISPUTE-RESOLVED",
+            "event_type": "CUSTOMER.DISPUTE.RESOLVED",
+            "resource": {
+                **resource,
+                "status": "RESOLVED",
+                "update_time": "2026-07-14T03:00:00Z",
+                "dispute_outcome": {
+                    "outcome_code": "RESOLVED_SELLER_FAVOUR"
+                },
+            },
+        }
+        process_paypal_webhook({}, resolved_event, paypal, self.inventory)
+        process_paypal_webhook({}, resolved_event, paypal, self.inventory)
+
+        case.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(order.paypal_cases.count(), 1)
+        self.assertEqual(case.status, PayPalCase.Status.RESOLVED)
+        self.assertEqual(case.outcome, "RESOLVED_SELLER_FAVOUR")
+        self.assertTrue(case.needs_review)
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(order.refunded_total, Decimal("0.00"))
+        self.assertEqual(len(self.inventory.committed), committed_count)
+        self.assertEqual(self.inventory.released, [])
+        self.assertEqual(
+            order.events.filter(kind__startswith="CUSTOMER.DISPUTE.").count(),
+            4,
+        )
+
+    def test_unrelated_paypal_dispute_is_ignored(self):
+        result = process_paypal_webhook(
+            {},
+            {
+                "id": "WH-OTHER-DISPUTE",
+                "event_type": "CUSTOMER.DISPUTE.CREATED",
+                "resource": {
+                    "dispute_id": "PP-D-OTHER",
+                    "disputed_transactions": [
+                        {"seller_transaction_id": "NON-STORE-CAPTURE"}
+                    ],
+                    "reason": "ITEM_NOT_RECEIVED",
+                    "status": "OPEN",
+                    "dispute_amount": {
+                        "currency_code": "USD",
+                        "value": "10.00",
+                    },
+                    "dispute_life_cycle_stage": "INQUIRY",
+                    "create_time": "2026-07-14T00:00:00Z",
+                },
+            },
+            PayPalSpy(),
+            self.inventory,
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(PayPalCase.objects.exists())
+        self.assertFalse(
+            OrderEvent.objects.filter(
+                event_key="paypal-webhook:WH-OTHER-DISPUTE"
+            ).exists()
+        )
+
+    def test_capture_reversal_creates_review_case_without_financial_side_effects(self):
+        order = self.create_order()
+        paypal = PayPalSpy()
+        create_paypal_checkout(order.pk, "https://a", "https://b", paypal)
+        capture_paypal_order(order.pk, paypal, self.inventory)
+        order.refresh_from_db()
+        event = {
+            "id": "WH-CAPTURE-REVERSED",
+            "event_type": "PAYMENT.CAPTURE.REVERSED",
+            "resource": {
+                "id": order.paypal_capture_id,
+                "amount": {"currency_code": "USD", "value": "13.80"},
+                "status_details": {"reason": "CHARGEBACK"},
+                "create_time": "2026-07-14T00:00:00Z",
+                "update_time": "2026-07-14T04:00:00Z",
+            },
+        }
+
+        process_paypal_webhook({}, event, paypal, self.inventory)
+        process_paypal_webhook({}, event, paypal, self.inventory)
+
+        case = order.paypal_cases.get()
+        order.refresh_from_db()
+        self.assertEqual(case.kind, PayPalCase.Kind.REVERSAL)
+        self.assertEqual(case.status, PayPalCase.Status.REVERSED)
+        self.assertEqual(case.reason, "CHARGEBACK")
+        self.assertEqual(case.amount, order.total)
+        self.assertTrue(case.needs_review)
+        self.assertEqual(order.paypal_status, "REVERSED")
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(order.refunded_total, Decimal("0.00"))
+        self.assertEqual(order.refunds.count(), 0)
+        self.assertEqual(order.paypal_cases.count(), 1)
+        self.assertEqual(len(self.inventory.committed), 1)
+        self.assertEqual(self.inventory.released, [])
+
+        with self.assertRaisesMessage(OrderStateError, "PayPal case"):
+            refund_order(order.pk, paypal)
+        with self.assertRaisesMessage(OrderStateError, "PayPal case"):
+            record_manual_shipment(order.pk, "USPS", "BLOCKED-TRACKING")
+        self.assertEqual(paypal.refund_calls, 0)
+        self.assertFalse(order.shipments.exists())
+
     def test_capture_webhook_never_decrements_uncommitted_inventory(self):
         order = self.create_order()
         order.paypal_order_id = "PAYPAL-ORDER-1"
@@ -873,6 +1064,102 @@ class OrderServiceTests(TestCase):
             InventoryOperation.objects.filter(
                 idempotency_key=f"sale-{reservation.pk}"
             ).exists()
+        )
+
+    def test_capture_reduces_sku_less_variant_by_specifics(self):
+        specifics = {"Combo": ["Moded Wide body with mount"]}
+        variant = self.product.variants.create(
+            source_key="missing-21368ac4ab1deb45e9c574bb",
+            sku="",
+            title="Moded Wide body with mount",
+            specifics=specifics,
+            price=Decimal("6.00"),
+            quantity=5,
+        )
+        product = self.product
+        self.line = CheckoutLine(
+            product_id=self.product.pk,
+            variant_id=variant.pk,
+            quantity=2,
+        )
+        order = self.create_order()
+        paypal = PayPalSpy()
+        create_paypal_checkout(order.pk, "https://a", "https://b", paypal)
+
+        class SkuLessVariationClient:
+            quantity = 5
+            revise_args = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exception_type, exception, traceback):
+                return False
+
+            def get_item(self, item_id):
+                live_variant = SimpleNamespace(
+                    source_key=variant.source_key,
+                    sku="",
+                    title=variant.title,
+                    specifics=specifics,
+                    price=variant.price,
+                    quantity=type(self).quantity,
+                    purchasable=True,
+                )
+                return ebay_listing(
+                    product,
+                    product.price,
+                    product.currency,
+                    type(self).quantity,
+                    (live_variant,),
+                )
+
+            def revise_inventory_status(self, *args):
+                raise AssertionError(
+                    "SKU-less inventory must not use ReviseInventoryStatus"
+                )
+
+            def revise_variation_inventory(
+                self,
+                item_id,
+                quantity,
+                message_id,
+                source_key,
+                sent_specifics,
+                price,
+                currency,
+            ):
+                type(self).revise_args = (
+                    item_id,
+                    quantity,
+                    message_id,
+                    source_key,
+                    sent_specifics,
+                    price,
+                    currency,
+                )
+                type(self).quantity = quantity
+                return quantity
+
+        with patch("catalog.inventory.EbayTradingClient", SkuLessVariationClient):
+            result = capture_paypal_order(
+                order.pk, paypal, EbayInventoryGateway()
+            )
+
+        variant.refresh_from_db()
+        self.assertEqual(result.status, Order.Status.PAID)
+        self.assertEqual(variant.quantity, 3)
+        self.assertEqual(
+            SkuLessVariationClient.revise_args,
+            (
+                self.product.ebay_item_id,
+                3,
+                f"sale-{order.items.get().reservation.pk}",
+                variant.source_key,
+                specifics,
+                variant.price,
+                self.product.currency,
+            ),
         )
 
     def test_capture_rejects_live_variant_price_change_and_refreshes_catalog(self):
@@ -1225,7 +1512,9 @@ class OrderServiceTests(TestCase):
             verified_quantity=3,
             status=InventoryOperation.Status.SUCCEEDED,
         )
-        live_variant = SimpleNamespace(sku=variant.sku, quantity=3)
+        live_variant = SimpleNamespace(
+            source_key=variant.source_key, sku=variant.sku, quantity=3
+        )
         listings = [
             ebay_listing(
                 self.product,
@@ -1907,6 +2196,43 @@ class PayPalClientTests(TestCase):
 
         with self.assertRaises(PayPalInstrumentDeclined):
             client.capture_order("ORDER", "CAPTURE")
+
+    def test_refund_surfaces_paypal_issue_and_debug_id(self):
+        def handler(request):
+            if request.url.path == "/v1/oauth2/token":
+                return httpx.Response(200, json={"access_token": "TOKEN"})
+            return httpx.Response(
+                422,
+                json={
+                    "name": "UNPROCESSABLE_ENTITY",
+                    "message": "The requested action could not be performed.",
+                    "debug_id": "DEBUG-REFUND-1",
+                    "details": [
+                        {
+                            "issue": "REFUND_NOT_ALLOWED",
+                            "description": "This capture cannot be refunded.",
+                        }
+                    ],
+                },
+            )
+
+        client = PayPalClient(
+            client_id="CLIENT",
+            client_secret="SECRET",
+            base_url="https://api-m.sandbox.paypal.com",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+        with self.assertRaises(PayPalRefundError) as raised:
+            client.refund_capture(
+                "CAPTURE", "1.00", "USD", "FM-1-REFUND-1", "REFUND"
+            )
+
+        self.assertEqual(raised.exception.issue, "REFUND_NOT_ALLOWED")
+        self.assertEqual(raised.exception.debug_id, "DEBUG-REFUND-1")
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("This capture cannot be refunded", str(raised.exception))
+        self.assertIn("PayPal debug ID: DEBUG-REFUND-1", str(raised.exception))
 
     def test_orders_refunds_and_signature_use_paypal_api(self):
         requests = []

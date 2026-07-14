@@ -21,6 +21,11 @@
           {% elif has_shipped and order.status == "refunded" %}
             <span class="status-chip status-chip--refunded">Refunded</span>
           {% endif %}
+          {% if has_paypal_reversal %}
+            <span class="status-chip status-chip--payment-reversed">Payment reversed</span>
+          {% elif has_active_paypal_dispute %}
+            <span class="status-chip status-chip--paypal-review">PayPal review</span>
+          {% endif %}
         </div>
         <span class="order-reference">Order {{ order.reference }}</span>
       </div>
@@ -64,6 +69,17 @@
         <p class="order-refund-note">Your partial refund was processed. PayPal will return it to the original payment method.</p>
       {% elif has_shipped and order.status == "refunded" %}
         <p class="order-refund-note">Your refund was processed. PayPal will return it to the original payment method.</p>
+      {% endif %}
+      {% if has_paypal_reversal %}
+        <div class="order-payment-notice order-payment-notice--danger" role="status">
+          <strong>PayPal reversed this payment.</strong>
+          <span>The payment is under review. Contact store support if you need help with this order.</span>
+        </div>
+      {% elif has_active_paypal_dispute %}
+        <div class="order-payment-notice" role="status">
+          <strong>A PayPal case is under review.</strong>
+          <span>Order updates will continue to appear here while PayPal reviews the case.</span>
+        </div>
       {% endif %}
     </header>
     {% include "orders/_order_detail.html" %}

@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from orders.models import Order, Refund, Shipment
+from orders.models import Order, PayPalCase, Refund, Shipment
 from storefront.models import StoreSettings
 
 from .models import InventoryOperation, Product, SyncRun
@@ -196,6 +196,59 @@ class AdminDashboardTests(TestCase):
         self.assertContains(review, "REFUND-failed")
         self.assertContains(review, "REFUND-cancelled")
         self.assertNotContains(review, "REFUND-RESOLVED-FAILURE")
+
+    def test_dashboard_surfaces_paypal_cases_requiring_review(self):
+        order = self.order()
+        PayPalCase.objects.create(
+            order=order,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id="PP-D-URGENT",
+            status=PayPalCase.Status.WAITING_FOR_SELLER_RESPONSE,
+            reason="ITEM_NOT_RECEIVED",
+            stage="INQUIRY",
+            amount=Decimal("5.00"),
+            currency="USD",
+            last_event_type="CUSTOMER.DISPUTE.UPDATED",
+        )
+        PayPalCase.objects.create(
+            order=order,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id="PP-D-OPEN",
+            status=PayPalCase.Status.OPEN,
+            reason="UNAUTHORIZED_TRANSACTION",
+            stage="INQUIRY",
+            amount=Decimal("10.00"),
+            currency="USD",
+            last_event_type="CUSTOMER.DISPUTE.CREATED",
+        )
+        PayPalCase.objects.create(
+            order=order,
+            kind=PayPalCase.Kind.REVERSAL,
+            paypal_case_id="CAPTURE-REVIEWED",
+            status=PayPalCase.Status.REVERSED,
+            amount=Decimal("10.00"),
+            currency="USD",
+            last_event_type="PAYMENT.CAPTURE.REVERSED",
+            needs_review=False,
+            reviewed_at=timezone.now(),
+        )
+
+        dashboard = self.client.get(reverse("admin:index"))
+        queue = self.client.get(
+            reverse("admin:orders_paypalcase_changelist"),
+            {"case_review": "needed"},
+        )
+
+        self.assertContains(dashboard, "PayPal case review")
+        self.assertContains(dashboard, "<strong>2</strong>", html=True)
+        self.assertContains(dashboard, "1 urgent")
+        self.assertContains(
+            dashboard,
+            f'{reverse("admin:orders_paypalcase_changelist")}?case_review=needed',
+        )
+        self.assertContains(queue, "PP-D-URGENT")
+        self.assertContains(queue, "PP-D-OPEN")
+        self.assertNotContains(queue, "CAPTURE-REVIEWED")
 
     def test_payment_review_metric_links_to_a_working_filtered_queue(self):
         review = self.order()

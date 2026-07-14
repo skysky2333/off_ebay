@@ -21,6 +21,7 @@ from .models import (
     Order,
     OrderEvent,
     OrderItem,
+    PayPalCase,
     Refund,
     Shipment,
 )
@@ -77,6 +78,13 @@ PAYPAL_REFUND_STATUSES = {
 REFUND_REVIEW_STATUSES = frozenset(
     {Refund.Status.PENDING, Refund.Status.FAILED, Refund.Status.CANCELLED}
 )
+PAYPAL_DISPUTE_EVENT_TYPES = frozenset(
+    {
+        "CUSTOMER.DISPUTE.CREATED",
+        "CUSTOMER.DISPUTE.UPDATED",
+        "CUSTOMER.DISPUTE.RESOLVED",
+    }
+)
 
 
 def refunds_needing_review(queryset=None):
@@ -87,10 +95,17 @@ def refunds_needing_review(queryset=None):
     )
 
 
+def paypal_cases_needing_review(queryset=None):
+    queryset = PayPalCase.objects.all() if queryset is None else queryset
+    return queryset.filter(needs_review=True)
+
+
 def orders_accepting_shipments(queryset=None):
     queryset = Order.objects.all() if queryset is None else queryset
-    return queryset.filter(status__in=SHIPPABLE_ORDER_STATUSES).exclude(
-        refunds__status=Refund.Status.PENDING
+    return (
+        queryset.filter(status__in=SHIPPABLE_ORDER_STATUSES)
+        .exclude(refunds__status=Refund.Status.PENDING)
+        .exclude(paypal_cases__needs_review=True)
     )
 
 
@@ -292,7 +307,6 @@ def create_guest_order(
                 variant.product_id != product.pk
                 or not variant.active
                 or not variant.purchasable
-                or not variant.sku
             ):
                 raise InventoryUnavailable("A selected product option is unavailable.")
             price = variant.direct_price
@@ -1013,6 +1027,8 @@ def refund_order(order_id, client: PayPalClient):
         order.paypal_refund_id = unresolved.paypal_refund_id
         order.save(update_fields=("paypal_refund_id", "updated_at"))
         return order
+    if order.paypal_cases.filter(needs_review=True).exists():
+        raise OrderStateError("Review the open PayPal case before refunding this order.")
     amount = order.total - order.refunded_total
     attempt = order.refunds.count() + 1
     response = client.refund_capture(
@@ -1327,6 +1343,235 @@ def reconcile_paypal_tracking(order_id, client: PayPalClient):
     return order
 
 
+def _paypal_optional_text(value, name, max_length):
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or len(value) > max_length:
+        raise PaymentDataError(f"PayPal {name} is invalid.")
+    return value
+
+
+def _paypal_datetime(value, name):
+    if value is None or value == "":
+        return None
+    parsed = parse_datetime(_paypal_text(value, name))
+    if parsed is None or timezone.is_naive(parsed):
+        raise PaymentDataError(f"PayPal {name} is invalid.")
+    return parsed
+
+
+def _paypal_case_amount(resource, field_name, order, existing):
+    payload = resource.get(field_name)
+    if payload is None and existing is not None:
+        return existing.currency, existing.amount
+    currency, amount = _paypal_amount(payload)
+    if currency != order.currency:
+        raise PaymentDataError("PayPal case currency does not match the order.")
+    if amount <= 0 or amount > order.total:
+        raise PaymentDataError("PayPal case amount is invalid.")
+    return currency, amount
+
+
+def _local_order_for_dispute(resource, existing):
+    transactions = resource.get("disputed_transactions")
+    if transactions is None:
+        if existing is not None:
+            return existing.order
+        raise PaymentDataError("PayPal dispute transactions are invalid.")
+    capture_ids = {
+        _paypal_text(
+            _paypal_object(transaction, "dispute transaction").get(
+                "seller_transaction_id"
+            ),
+            "dispute transaction ID",
+        )
+        for transaction in _paypal_list(transactions, "dispute transactions")
+    }
+    if not capture_ids:
+        raise PaymentDataError("PayPal dispute transactions are invalid.")
+    if existing is not None:
+        if existing.order.paypal_capture_id not in capture_ids:
+            raise PaymentDataError("PayPal dispute transaction does not match the order.")
+        return existing.order
+    order_ids = list(
+        Order.objects.filter(paypal_capture_id__in=capture_ids)
+        .order_by("pk")
+        .values_list("pk", flat=True)[:2]
+    )
+    if not order_ids:
+        return None
+    if len(order_ids) != 1:
+        raise PaymentDataError("PayPal dispute spans multiple store orders.")
+    return Order.objects.get(pk=order_ids[0])
+
+
+@transaction.atomic
+def _record_paypal_dispute(resource, event_type, now):
+    case_id = _paypal_text(resource.get("dispute_id"), "dispute ID")
+    if len(case_id) > 255:
+        raise PaymentDataError("PayPal dispute ID is invalid.")
+    existing = (
+        PayPalCase.objects.select_related("order")
+        .filter(kind=PayPalCase.Kind.DISPUTE, paypal_case_id=case_id)
+        .first()
+    )
+    order = _local_order_for_dispute(resource, existing)
+    if order is None:
+        return None
+    order = Order.objects.select_for_update().get(pk=order.pk)
+    case = (
+        PayPalCase.objects.select_for_update()
+        .filter(kind=PayPalCase.Kind.DISPUTE, paypal_case_id=case_id)
+        .first()
+    )
+    if case is not None and case.order_id != order.pk:
+        raise PaymentDataError("PayPal dispute identity does not match the order.")
+    status = _paypal_text(resource.get("status"), "dispute status")
+    if status not in PayPalCase.Status.values or status == PayPalCase.Status.REVERSED:
+        raise PaymentDataError("PayPal dispute status is invalid.")
+    if (
+        event_type == "CUSTOMER.DISPUTE.RESOLVED"
+        and status != PayPalCase.Status.RESOLVED
+    ):
+        raise PaymentDataError("PayPal resolved dispute has an invalid status.")
+    provider_created_at = _paypal_datetime(
+        resource.get("create_time"), "dispute creation time"
+    )
+    provider_updated_at = _paypal_datetime(
+        resource.get("update_time"), "dispute update time"
+    )
+    watermark = provider_updated_at or provider_created_at
+    if (
+        case is not None
+        and watermark is not None
+        and case.provider_updated_at is not None
+        and watermark < case.provider_updated_at
+    ):
+        return order, case_id
+    currency, amount = _paypal_case_amount(
+        resource, "dispute_amount", order, case
+    )
+    reason = _paypal_optional_text(resource.get("reason"), "dispute reason", 64)
+    stage = _paypal_optional_text(
+        resource.get("dispute_life_cycle_stage"),
+        "dispute lifecycle stage",
+        32,
+    )
+    channel = _paypal_optional_text(
+        resource.get("dispute_channel"), "dispute channel", 32
+    )
+    outcome_payload = resource.get("dispute_outcome")
+    if outcome_payload is None:
+        outcome = case.outcome if case is not None else ""
+    else:
+        outcome = _paypal_optional_text(
+            _paypal_object(outcome_payload, "dispute outcome").get("outcome_code"),
+            "dispute outcome",
+            64,
+        )
+    if case is not None:
+        reason = reason or case.reason
+        stage = stage or case.stage
+        channel = channel or case.channel
+    if "seller_response_due_date" in resource:
+        seller_response_due_at = _paypal_datetime(
+            resource.get("seller_response_due_date"),
+            "seller response due date",
+        )
+    else:
+        seller_response_due_at = (
+            case.seller_response_due_at if case is not None else None
+        )
+    if case is None:
+        case = PayPalCase(
+            order=order,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id=case_id,
+        )
+    case.status = status
+    case.reason = reason
+    case.outcome = outcome
+    case.stage = stage
+    case.channel = channel
+    case.amount = amount
+    case.currency = currency
+    case.seller_response_due_at = seller_response_due_at
+    case.provider_created_at = (
+        provider_created_at or case.provider_created_at
+    )
+    case.provider_updated_at = watermark or case.provider_updated_at
+    case.last_event_type = event_type
+    case.needs_review = True
+    case.reviewed_at = None
+    case.save()
+    return order, case_id
+
+
+@transaction.atomic
+def _record_paypal_reversal(resource, event_type, now):
+    capture_id = _paypal_text(resource.get("id"), "capture ID")
+    order = Order.objects.filter(paypal_capture_id=capture_id).first()
+    if order is None:
+        return None
+    order = Order.objects.select_for_update().get(pk=order.pk)
+    case = (
+        PayPalCase.objects.select_for_update()
+        .filter(kind=PayPalCase.Kind.REVERSAL, paypal_case_id=capture_id)
+        .first()
+    )
+    currency, amount = _paypal_case_amount(resource, "amount", order, case)
+    provider_created_at = _paypal_datetime(
+        resource.get("create_time"), "capture creation time"
+    )
+    provider_updated_at = _paypal_datetime(
+        resource.get("update_time"), "capture update time"
+    )
+    watermark = provider_updated_at or provider_created_at
+    if (
+        case is not None
+        and watermark is not None
+        and case.provider_updated_at is not None
+        and watermark < case.provider_updated_at
+    ):
+        return order, capture_id
+    status_details = resource.get("status_details")
+    reason = (
+        _paypal_optional_text(
+            _paypal_object(status_details, "capture status details").get("reason"),
+            "capture reversal reason",
+            64,
+        )
+        if status_details is not None
+        else (case.reason if case is not None else "")
+    )
+    if case is None:
+        case = PayPalCase(
+            order=order,
+            kind=PayPalCase.Kind.REVERSAL,
+            paypal_case_id=capture_id,
+        )
+    case.status = PayPalCase.Status.REVERSED
+    case.reason = reason
+    case.outcome = ""
+    case.stage = ""
+    case.channel = ""
+    case.amount = amount
+    case.currency = currency
+    case.seller_response_due_at = None
+    case.provider_created_at = (
+        provider_created_at or case.provider_created_at
+    )
+    case.provider_updated_at = watermark or case.provider_updated_at
+    case.last_event_type = event_type
+    case.needs_review = True
+    case.reviewed_at = None
+    case.save()
+    if order.paypal_status != PayPalCase.Status.REVERSED:
+        order.paypal_status = PayPalCase.Status.REVERSED
+        order.save(update_fields=("paypal_status", "updated_at"))
+    return order, capture_id
+
+
 @transaction.atomic
 def _record_webhook_event(order_id, event_id, event_type, resource_id):
     order = Order.objects.select_for_update().get(pk=order_id)
@@ -1371,6 +1616,8 @@ def process_paypal_webhook(
         "PAYMENT.CAPTURE.PENDING",
         "PAYMENT.CAPTURE.DECLINED",
         "PAYMENT.CAPTURE.REFUNDED",
+        "PAYMENT.CAPTURE.REVERSED",
+        *PAYPAL_DISPUTE_EVENT_TYPES,
     }
     if event_type not in supported_event_types:
         return None
@@ -1415,8 +1662,11 @@ def process_paypal_webhook(
         order = _apply_capture_result(order.pk, resource, inventory)
     elif event_type == "PAYMENT.CAPTURE.REFUNDED":
         capture_id = _refund_capture_id(resource)
+        order = Order.objects.filter(paypal_capture_id=capture_id).first()
+        if order is None:
+            return None
         with transaction.atomic():
-            order = Order.objects.select_for_update().get(paypal_capture_id=capture_id)
+            order = Order.objects.select_for_update().get(pk=order.pk)
             amount = resource.get("amount")
             currency, refund_amount = _paypal_amount(amount)
             resource_id = resource.get("id")
@@ -1425,6 +1675,16 @@ def process_paypal_webhook(
             if currency != order.currency:
                 raise PaymentDataError("PayPal refund currency does not match the order.")
             _apply_refund(order, resource_id, refund_amount, now)
+    elif event_type == "PAYMENT.CAPTURE.REVERSED":
+        result = _record_paypal_reversal(resource, event_type, now)
+        if result is None:
+            return None
+        order, resource_id = result
+    elif event_type in PAYPAL_DISPUTE_EVENT_TYPES:
+        result = _record_paypal_dispute(resource, event_type, now)
+        if result is None:
+            return None
+        order, resource_id = result
     return _record_webhook_event(order.pk, event_id, event_type, resource_id)
 
 
@@ -1453,6 +1713,11 @@ def record_manual_shipment(
         if order.refunds.filter(status=Refund.Status.PENDING).exists():
             raise OrderStateError(
                 "Orders with a pending refund cannot receive a new shipment."
+            )
+        if order.paypal_cases.filter(needs_review=True).exists():
+            raise OrderStateError(
+                "Orders with an unreviewed PayPal case cannot receive "
+                "a new shipment."
             )
         shipment = Shipment(
             order=order,

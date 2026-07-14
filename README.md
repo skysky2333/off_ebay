@@ -8,14 +8,15 @@ Off-Ebay is not affiliated with or endorsed by eBay, PayPal, Pirate Ship, or Clo
 
 ## What It Does
 
-- Imports supported active fixed-price eBay listings, variations, descriptions, photos, condition, price, and available quantity.
+- Imports supported active fixed-price eBay listings, including variations without seller-defined SKUs, descriptions, photos, condition, price, and available quantity.
 - Shows the original eBay price, the configured direct price, and a link to the corresponding eBay listing.
 - Rechecks the current eBay listing and reduces eBay inventory before PayPal captures payment.
 - Uses server-calculated, immutable order totals; browser-submitted prices are never trusted.
 - Accepts guest PayPal checkout for United States shipping addresses.
 - Reconciles pending payments, refunds, expired reservations, and PayPal shipment tracking in a background worker.
 - Lets Pirate Ship receive paid PayPal orders and lets tracking flow back through PayPal.
-- Provides a private Django Admin dashboard for store availability, orders, refunds, fulfillment, sync health, and failures.
+- Records PayPal disputes and payment reversals without automatically moving money or inventory.
+- Provides a private Django Admin dashboard for store availability, orders, refunds, PayPal cases, fulfillment, sync health, and failures.
 - Runs the application in one pinned Conda environment, both locally and inside Docker.
 
 ## Screenshots
@@ -257,6 +258,10 @@ Off-Ebay intentionally refuses to synchronize or sell until this setting is enab
    - `PAYMENT.CAPTURE.PENDING`
    - `PAYMENT.CAPTURE.DECLINED`
    - `PAYMENT.CAPTURE.REFUNDED`
+   - `PAYMENT.CAPTURE.REVERSED`
+   - `CUSTOMER.DISPUTE.CREATED`
+   - `CUSTOMER.DISPUTE.UPDATED`
+   - `CUSTOMER.DISPUTE.RESOLVED`
 5. Put the resulting webhook ID in `PAYPAL_WEBHOOK_ID`.
 
 All PayPal values must come from the same live application. See PayPal's [webhook documentation](https://developer.paypal.com/api/rest/webhooks/).
@@ -337,7 +342,7 @@ In Admin, **Products** is read-only except for **Checkout excluded**. Use that s
 
 ### Orders and Fulfillment
 
-The Admin dashboard surfaces orders needing fulfillment, payment review, refund review, inventory failures, sync health, and recent orders.
+The Admin dashboard surfaces orders needing fulfillment, payment review, refund review, PayPal case review, inventory failures, sync health, and recent orders.
 
 Open a paid order to see its recipient, PayPal references, immutable item prices, status link, and event history. Use **Add shipment** to enter tracking manually. Check **Final shipment** only for the last package; partial shipments stay in the fulfillment queue.
 
@@ -348,6 +353,12 @@ PayPal-imported tracking must also be marked as the final shipment when no addit
 In **Orders**, select exactly one captured paid order, choose **Refund one captured order through PayPal**, review the confirmation page, and confirm. The action refunds the remaining paid balance. Pending and failed refunds stay visible, and the worker reconciles pending provider responses.
 
 ### Customers
+### PayPal Cases
+
+PayPal disputes and capture reversals appear in **PayPal cases** and on the related order. New or updated cases enter the dashboard review queue and temporarily block new shipment and seller-initiated refund actions. Review and respond to the case in PayPal's Resolution Center, then use **Mark selected PayPal cases reviewed** to acknowledge it locally. A newer PayPal update reopens the Admin alert.
+
+Marking a case reviewed does not send a response, provide evidence, accept a claim, issue a refund, change inventory, or otherwise alter the PayPal case. Completed external refunds continue to synchronize through `PAYMENT.CAPTURE.REFUNDED`.
+
 
 Customers do not create accounts. They check out as guests and receive a private order-status URL. The same URL is available from the Admin order page.
 

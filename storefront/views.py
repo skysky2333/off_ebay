@@ -28,7 +28,7 @@ from catalog.notifications import (
 )
 from catalog.services import process_ebay_account_closure
 from orders.inventory import InventoryUnavailable
-from orders.models import Order, Shipment
+from orders.models import Order, PayPalCase, Shipment
 from orders.paypal import PayPalClient, PayPalInstrumentDeclined
 from orders.services import (
     CheckoutLine,
@@ -221,7 +221,6 @@ def product_detail(request, slug):
         for variant in product.variants.all()
         if variant.active
         and variant.purchasable
-        and variant.sku
         and variant.available_quantity > 0
     ]
     return render(
@@ -535,15 +534,30 @@ def paypal_capture(request):
     return _payment_response(request, order)
 
 
+def _paypal_case_flags(order):
+    cases = list(order.paypal_cases.all())
+    return {
+        "has_active_paypal_dispute": any(
+            case.kind == PayPalCase.Kind.DISPUTE
+            and case.status != PayPalCase.Status.RESOLVED
+            for case in cases
+        ),
+        "has_paypal_reversal": any(
+            case.kind == PayPalCase.Kind.REVERSAL for case in cases
+        ),
+    }
+
+
 @never_cache
 @require_safe
 def order_confirmation(request, token):
     order = get_object_or_404(
-        Order.objects.prefetch_related("items", "shipments"),
+        Order.objects.prefetch_related("items", "shipments", "paypal_cases"),
         status_token=token,
         paid_at__isnull=False,
     )
-    if order.status == Order.Status.REFUNDED:
+    case_flags = _paypal_case_flags(order)
+    if order.status == Order.Status.REFUNDED or any(case_flags.values()):
         Cart(request).forget_order(order.pk)
         return redirect("storefront:order_status", token=order.status_token)
     Cart(request).forget_order(order.pk)
@@ -563,7 +577,8 @@ def order_confirmation(request, token):
 @require_safe
 def order_status(request, token):
     order = get_object_or_404(
-        Order.objects.prefetch_related("items", "shipments"), status_token=token
+        Order.objects.prefetch_related("items", "shipments", "paypal_cases"),
+        status_token=token,
     )
     if (
         order.paid_at
@@ -586,6 +601,7 @@ def order_status(request, token):
     is_delivered = any(shipment.completes_order for shipment in shipments) and all(
         shipment.status == Shipment.Status.DELIVERED for shipment in shipments
     )
+    case_flags = _paypal_case_flags(order)
     return render(
         request,
         "orders/order_status.html",
@@ -594,6 +610,7 @@ def order_status(request, token):
             "has_shipped": has_shipped,
             "has_delivered": has_delivered,
             "is_delivered": is_delivered,
+            **case_flags,
             "shipments": shipments,
             "can_resume_payment": (
                 order.status == Order.Status.FUNDING_RETRY

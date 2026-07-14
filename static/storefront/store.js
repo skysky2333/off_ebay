@@ -1,19 +1,49 @@
 const galleryImage = document.querySelector("[data-gallery-image]");
 const galleryLink = document.querySelector("[data-gallery-link]");
 const galleryThumbs = document.querySelectorAll("[data-gallery-thumb]");
+const imageViewer = document.querySelector("[data-image-viewer]");
+const imageViewerImage = document.querySelector("[data-image-viewer-image]");
+const imageViewerClose = document.querySelector("[data-image-viewer-close]");
 
 for (const thumbnail of galleryThumbs) {
   thumbnail.addEventListener("click", (event) => {
+    if (!galleryImage || !galleryLink) return;
     event.preventDefault();
     galleryImage.hidden = false;
     galleryLink.hidden = false;
     galleryImage.src = thumbnail.dataset.imageSrc;
     galleryImage.alt = thumbnail.dataset.imageAlt;
     galleryLink.href = thumbnail.dataset.imageSrc;
+    galleryLink.dataset.imageSrc = thumbnail.dataset.imageSrc;
+    galleryLink.dataset.imageAlt = thumbnail.dataset.imageAlt;
     galleryLink.setAttribute("aria-label", thumbnail.dataset.imageLabel);
     for (const other of galleryThumbs) other.setAttribute("aria-current", "false");
     thumbnail.setAttribute("aria-current", "true");
   });
+}
+
+if (galleryLink && imageViewer && imageViewerImage) {
+  galleryLink.addEventListener("click", (event) => {
+    if (typeof imageViewer.showModal !== "function") return;
+    event.preventDefault();
+    imageViewerImage.src = galleryLink.dataset.imageSrc || galleryLink.href;
+    imageViewerImage.alt = galleryLink.dataset.imageAlt || galleryImage?.alt || "";
+    imageViewer.showModal();
+  });
+
+  imageViewer.addEventListener("click", (event) => {
+    const bounds = imageViewer.getBoundingClientRect();
+    const outside =
+      event.clientX < bounds.left ||
+      event.clientX > bounds.right ||
+      event.clientY < bounds.top ||
+      event.clientY > bounds.bottom;
+    if (outside) imageViewer.close();
+  });
+}
+
+if (imageViewer && imageViewerClose) {
+  imageViewerClose.addEventListener("click", () => imageViewer.close());
 }
 
 for (const stepper of document.querySelectorAll("[data-quantity-stepper]")) {

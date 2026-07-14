@@ -12,9 +12,11 @@ from .services import set_inventory_quantity, sync_listing, sync_unavailable_lis
 
 
 def _listing_variant(listing, variant):
-    matches = [item for item in listing.variations if item.sku == variant.sku]
+    matches = [
+        item for item in listing.variations if item.source_key == variant.source_key
+    ]
     if len(matches) != 1:
-        raise InventoryUnavailable(f"eBay no longer has variation SKU {variant.sku}.")
+        raise InventoryUnavailable(f"eBay no longer has option {variant.title}.")
     return matches[0]
 
 
@@ -60,7 +62,6 @@ class EbayInventoryGateway:
                 variant.product_id != product.pk
                 or not variant.active
                 or not variant.purchasable
-                or not variant.sku
                 or variant.sku != item.variation_sku
             ):
                 raise InventoryUnavailable(f"{item.title} is no longer available.")
@@ -171,7 +172,7 @@ class EbayInventoryGateway:
                         f"GetItem returned {listing.item_id} for {item.ebay_item_id}"
                     )
                 variant_missing = item.variant and not any(
-                    candidate.sku == item.variant.sku
+                    candidate.source_key == item.variant.source_key
                     for candidate in listing.variations
                 )
                 if listing.listing_status != ACTIVE_LISTING_STATUS or variant_missing:

@@ -9,6 +9,51 @@ class PayPalInstrumentDeclined(RuntimeError):
     pass
 
 
+class PayPalRefundError(RuntimeError):
+    def __init__(self, message, *, issue="", debug_id="", status_code=None):
+        super().__init__(message)
+        self.issue = issue
+        self.debug_id = debug_id
+        self.status_code = status_code
+
+
+def _refund_error_from_response(response):
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details", [])
+    detail = next(
+        (item for item in details if isinstance(item, dict)),
+        {},
+    )
+    issue = detail.get("issue", "")
+    description = detail.get("description", "")
+    provider_message = payload.get("message", "")
+    debug_id = payload.get("debug_id", "")
+    issue = issue if isinstance(issue, str) else ""
+    description = description if isinstance(description, str) else ""
+    provider_message = provider_message if isinstance(provider_message, str) else ""
+    debug_id = debug_id if isinstance(debug_id, str) else ""
+    message = (
+        description
+        or provider_message
+        or f"PayPal returned HTTP {response.status_code}."
+    ).rstrip(".")
+    if issue:
+        message += f" ({issue})"
+    if debug_id:
+        message += f". PayPal debug ID: {debug_id}"
+    return PayPalRefundError(
+        f"{message}.",
+        issue=issue,
+        debug_id=debug_id,
+        status_code=response.status_code,
+    )
+
+
 class PayPalClient:
     def __init__(
         self,
@@ -110,15 +155,22 @@ class PayPalClient:
         return response.json()
 
     def refund_capture(self, capture_id, amount, currency, invoice_id, request_id):
-        response = self.http.post(
-            f"{self.base_url}/v2/payments/captures/{capture_id}/refund",
-            headers={**self._headers(request_id), "Prefer": "return=representation"},
-            json={
-                "amount": {"value": str(amount), "currency_code": currency},
-                "invoice_id": invoice_id,
-            },
-        )
-        response.raise_for_status()
+        try:
+            response = self.http.post(
+                f"{self.base_url}/v2/payments/captures/{capture_id}/refund",
+                headers={**self._headers(request_id), "Prefer": "return=representation"},
+                json={
+                    "amount": {"value": str(amount), "currency_code": currency},
+                    "invoice_id": invoice_id,
+                },
+            )
+        except httpx.HTTPError as error:
+            raise PayPalRefundError(
+                "PayPal could not confirm the refund request. "
+                "Check the PayPal transaction before retrying."
+            ) from error
+        if not response.is_success:
+            raise _refund_error_from_response(response)
         return response.json()
 
     def get_refund(self, refund_id):

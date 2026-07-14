@@ -56,7 +56,19 @@
                 <p class="product-card__price price"><span class="price-label">Direct</span> ${{ product.display_direct_price|floatformat:2 }}</p>
                 <p class="ebay-price"><span class="price-label">eBay</span> <s>${{ product.display_price|floatformat:2 }}</s></p>
               </div>
-              <a class="ebay-link" href="{{ product.listing_url }}">View on eBay</a>
+              <div class="product-card__actions">
+                <a class="button button--secondary product-card__action" href="{% url 'storefront:product_detail' slug=product.slug %}">View details</a>
+                {% if product.has_active_variants %}
+                  <a class="button button--accent product-card__action" href="{% url 'storefront:product_detail' slug=product.slug %}#purchase">Add to cart</a>
+                {% else %}
+                  <form method="post" action="{% url 'storefront:cart_add' slug=product.slug %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="quantity" value="1">
+                    <button class="button button--accent product-card__action" type="submit">Add to cart</button>
+                  </form>
+                {% endif %}
+                <a class="product-card__ebay" href="{{ product.listing_url }}">View on eBay</a>
+              </div>
             </div>
           </article>
         {% endfor %}

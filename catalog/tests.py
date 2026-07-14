@@ -35,12 +35,12 @@ def fixture(name):
     EBAY_TRADING_ENDPOINT="https://api.example/trading",
 )
 class EbayClientTests(TestCase):
-    def test_parse_listing_preserves_catalog_data_and_disables_missing_sku(self):
+    def test_parse_listing_preserves_catalog_data_and_sku_less_variations(self):
         listing = parse_listing(ElementTree.fromstring(fixture("get_item.xml")))
 
         self.assertEqual(listing.item_id, "123456789012")
         self.assertEqual(listing.listing_status, "Active")
-        self.assertEqual(str(listing.price), "19.00")
+        self.assertEqual(str(listing.price), "17.00")
         self.assertEqual(listing.quantity, 4)
         self.assertNotIn("<script", listing.description)
         self.assertEqual(listing.item_specifics["Material"], ["Steel", "Rubber"])
@@ -49,7 +49,8 @@ class EbayClientTests(TestCase):
         self.assertEqual(listing.images[-1].variation_value, "Red")
         self.assertEqual(listing.variations[0].title, "Red")
         self.assertTrue(listing.variations[0].purchasable)
-        self.assertFalse(listing.variations[1].purchasable)
+        self.assertTrue(listing.variations[1].purchasable)
+        self.assertTrue(listing.variations[1].source_key.startswith("missing-"))
 
     def test_parse_listing_uses_the_lowest_available_purchasable_variant_price(self):
         root = ElementTree.fromstring(fixture("get_item.xml"))
@@ -64,6 +65,37 @@ class EbayClientTests(TestCase):
         self.assertEqual(listing.price, Decimal("19.00"))
         self.assertEqual(listing.variations[1].quantity, 0)
         self.assertTrue(listing.variations[1].purchasable)
+
+    def test_parse_listing_labels_multi_dimension_variations(self):
+        root = ElementTree.fromstring(fixture("get_item.xml"))
+        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+        specifics = root.find(
+            ".//e:Variations/e:Variation/e:VariationSpecifics", namespace
+        )
+        entry = ElementTree.SubElement(
+            specifics, f"{{{namespace['e']}}}NameValueList"
+        )
+        ElementTree.SubElement(entry, f"{{{namespace['e']}}}Name").text = "Size"
+        ElementTree.SubElement(entry, f"{{{namespace['e']}}}Value").text = "Large"
+
+        listing = parse_listing(root)
+
+        self.assertEqual(
+            listing.variations[0].title, "Color: Red / Size: Large"
+        )
+
+    def test_parse_listing_rejects_duplicate_variation_identity(self):
+        root = ElementTree.fromstring(fixture("get_item.xml"))
+        namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+        variations = root.findall(".//e:Variations/e:Variation", namespace)
+        sku = ElementTree.Element(f"{{{namespace['e']}}}SKU")
+        sku.text = "RED-01"
+        variations[1].insert(0, sku)
+
+        with self.assertRaisesMessage(
+            EbayResponseError, "duplicate variation identity"
+        ):
+            parse_listing(root)
 
     def test_parse_listing_rejects_invalid_prices(self):
         namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
@@ -249,6 +281,77 @@ class EbayClientTests(TestCase):
                 2,
             )
 
+    def test_revises_sku_less_variation_inventory_by_specifics(self):
+        listing = parse_listing(ElementTree.fromstring(fixture("get_item.xml")))
+        option = listing.variations[1]
+
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "access"})
+            call = request.headers["x-ebay-api-call-name"]
+            if call == "ReviseFixedPriceItem":
+                root = ElementTree.fromstring(request.content)
+                namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+                self.assertEqual(
+                    root.findtext("e:MessageID", namespaces=namespace),
+                    "inventory-skuless-1",
+                )
+                self.assertEqual(
+                    root.findtext(
+                        "e:Item/e:Variations/e:Variation/e:StartPrice",
+                        namespaces=namespace,
+                    ),
+                    "17.00",
+                )
+                self.assertEqual(
+                    root.find(
+                        "e:Item/e:Variations/e:Variation/e:StartPrice",
+                        namespace,
+                    ).attrib["currencyID"],
+                    "USD",
+                )
+                self.assertEqual(
+                    root.findtext(
+                        "e:Item/e:Variations/e:Variation/e:Quantity",
+                        namespaces=namespace,
+                    ),
+                    "1",
+                )
+                self.assertEqual(
+                    root.findtext(
+                        "e:Item/e:Variations/e:Variation/e:VariationSpecifics/"
+                        "e:NameValueList/e:Name",
+                        namespaces=namespace,
+                    ),
+                    "Color",
+                )
+                return httpx.Response(
+                    200,
+                    text=(
+                        '<ReviseFixedPriceItemResponse xmlns="urn:ebay:apis:'
+                        'eBLBaseComponents"><Ack>Success</Ack>'
+                        "</ReviseFixedPriceItemResponse>"
+                    ),
+                )
+            root = ElementTree.fromstring(fixture("get_item.xml"))
+            namespace = {"e": "urn:ebay:apis:eBLBaseComponents"}
+            variations = root.findall(".//e:Variations/e:Variation", namespace)
+            variations[1].find("e:Quantity", namespace).text = "1"
+            return httpx.Response(200, content=ElementTree.tostring(root))
+
+        with EbayTradingClient(transport=httpx.MockTransport(handler)) as client:
+            verified = client.revise_variation_inventory(
+                listing.item_id,
+                1,
+                "inventory-skuless-1",
+                option.source_key,
+                option.specifics,
+                option.price,
+                listing.currency,
+            )
+
+        self.assertEqual(verified, 1)
+
 
 class FakeClient:
     def __init__(self, listings, fail_on=""):
@@ -313,7 +416,7 @@ class CatalogSyncTests(TestCase):
         self.assertTrue(existing.checkout_excluded)
         self.assertEqual(existing.images.count(), 3)
         self.assertEqual(existing.variants.count(), 2)
-        self.assertFalse(existing.variants.get(sku="").purchasable)
+        self.assertTrue(existing.variants.get(sku="").purchasable)
         self.assertFalse(stale.active)
         self.assertEqual(stale.quantity, 0)
 
@@ -539,6 +642,76 @@ class CatalogSyncTests(TestCase):
         self.assertEqual(current.price, blue.price)
         self.assertEqual(current.quantity, blue.quantity)
 
+    def test_sku_less_variant_inventory_uses_specifics_update(self):
+        current = product("123456789012", price="17.00", quantity=4)
+        option = self.listing.variations[1]
+        variant = current.variants.create(
+            source_key=option.source_key,
+            sku=option.sku,
+            title=option.title,
+            specifics=option.specifics,
+            price=option.price,
+            quantity=option.quantity,
+            purchasable=True,
+        )
+
+        class InventoryClient:
+            args = None
+
+            def get_item(self, item_id):
+                return self.listing
+
+            def revise_inventory_status(self, *args):
+                raise AssertionError("SKU-less inventory must use variation specifics")
+
+            def revise_variation_inventory(
+                self,
+                item_id,
+                quantity,
+                message_id,
+                source_key,
+                specifics,
+                price,
+                currency,
+            ):
+                self.args = (
+                    item_id,
+                    quantity,
+                    message_id,
+                    source_key,
+                    specifics,
+                    price,
+                    currency,
+                )
+                return quantity
+
+        client = InventoryClient()
+        client.listing = self.listing
+        set_inventory_quantity(
+            client,
+            product=current,
+            variant=variant,
+            expected_quantity=option.quantity,
+            quantity=1,
+            reason=InventoryOperation.Reason.SALE,
+            idempotency_key="sell-skuless-variant",
+        )
+
+        variant.refresh_from_db()
+        self.assertEqual(variant.quantity, 1)
+        self.assertEqual(
+            client.args,
+            (
+                current.ebay_item_id,
+                1,
+                "sell-skuless-variant",
+                option.source_key,
+                option.specifics,
+                option.price,
+                self.listing.currency,
+            ),
+        )
+
     def test_inventory_retry_recognizes_a_lost_success_without_replaying(self):
         current = product("123456789012", quantity=3)
 
@@ -694,17 +867,18 @@ class CatalogSyncTests(TestCase):
         self.assertFalse(current.is_purchasable)
         self.assertNotIn(current, Product.objects.purchasable())
 
-    def test_active_variant_without_sku_is_not_available(self):
+    def test_active_sku_less_variant_with_specifics_is_available(self):
         current = product("123456789012", quantity=1)
         current.variants.create(
             source_key="missing-sku",
             sku="",
-            title="Unavailable variation",
+            title="Combo option",
+            specifics={"Combo": ["Body with mount"]},
             price="10.00",
             quantity=1,
             purchasable=True,
         )
 
-        self.assertEqual(current.available_quantity, 0)
-        self.assertFalse(current.is_purchasable)
-        self.assertNotIn(current, Product.objects.purchasable())
+        self.assertEqual(current.available_quantity, 1)
+        self.assertTrue(current.is_purchasable)
+        self.assertIn(current, Product.objects.purchasable())

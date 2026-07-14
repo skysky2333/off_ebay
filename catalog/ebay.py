@@ -255,33 +255,56 @@ def _images(item):
     return tuple(images)
 
 
+def _variation_source_key(sku, specifics):
+    if sku:
+        return sku
+    signature = json.dumps(specifics, sort_keys=True, separators=(",", ":"))
+    return f"missing-{hashlib.sha256(signature.encode()).hexdigest()[:24]}"
+
+
+def _variation_title(specifics):
+    groups = list(specifics.items())
+    if len(groups) == 1:
+        return " / ".join(groups[0][1])[:255]
+    return " / ".join(
+        f"{name}: {', '.join(values)}" for name, values in groups
+    )[:255]
+
+
+def _variation_is_targetable(sku, specifics):
+    return bool(sku) or (
+        bool(specifics)
+        and all(values and all(values) for values in specifics.values())
+    )
+
+
 def _variations(item, currency):
     variations = []
+    source_keys = set()
     for variation in item.findall("e:Variations/e:Variation", NS):
         sku = _text(variation, "e:SKU")
         specifics = _specifics(
             variation, "e:VariationSpecifics/e:NameValueList"
         )
-        signature = json.dumps(specifics, sort_keys=True, separators=(",", ":"))
-        source_key = sku or (
-            f"missing-{hashlib.sha256(signature.encode()).hexdigest()[:24]}"
-        )
+        source_key = _variation_source_key(sku, specifics)
+        if source_key in source_keys:
+            raise EbayResponseError("eBay response has duplicate variation identity")
+        source_keys.add(source_key)
         price, variation_currency = _money(variation, "e:StartPrice")
         if variation_currency != currency:
             raise EbayResponseError(
                 f"eBay variation currency {variation_currency} does not match "
                 f"listing currency {currency}"
             )
-        values = [value for group in specifics.values() for value in group]
         variations.append(
             EbayVariation(
                 source_key=source_key,
                 sku=sku,
-                title=" / ".join(values)[:255],
+                title=_variation_title(specifics),
                 specifics=specifics,
                 price=price,
                 quantity=_available_quantity(variation),
-                purchasable=bool(sku),
+                purchasable=_variation_is_targetable(sku, specifics),
             )
         )
     return tuple(variations)
@@ -470,6 +493,54 @@ class EbayTradingClient:
         _child(request, "IncludeItemSpecifics", "true")
         _child(request, "ItemID", item_id)
         return parse_listing(self._call("GetItem", request))
+
+    def revise_variation_inventory(
+        self,
+        item_id,
+        quantity,
+        message_id,
+        source_key,
+        specifics,
+        price,
+        currency,
+    ):
+        if (
+            not _variation_is_targetable("", specifics)
+            or _variation_source_key("", specifics) != source_key
+        ):
+            raise ValueError("SKU-less variation identity is invalid")
+        request = _element("ReviseFixedPriceItemRequest")
+        _child(request, "MessageID", message_id)
+        item = _child(request, "Item")
+        _child(item, "ItemID", item_id)
+        variations = _child(item, "Variations")
+        variation = _child(variations, "Variation")
+        start_price = _child(variation, "StartPrice", price)
+        start_price.set("currencyID", currency)
+        _child(variation, "Quantity", quantity)
+        variation_specifics = _child(variation, "VariationSpecifics")
+        for name, values in specifics.items():
+            entry = _child(variation_specifics, "NameValueList")
+            _child(entry, "Name", name)
+            for value in values:
+                _child(entry, "Value", value)
+        self._call("ReviseFixedPriceItem", request)
+        listing = self.get_item(item_id)
+        matches = [
+            variation
+            for variation in listing.variations
+            if variation.source_key == source_key
+        ]
+        if len(matches) != 1:
+            raise EbayResponseError(
+                "GetItem did not return the revised SKU-less variation"
+            )
+        verified = matches[0].quantity
+        if verified != quantity:
+            raise EbayResponseError(
+                f"eBay inventory verification expected {quantity}, returned {verified}"
+            )
+        return verified
 
     def revise_inventory_status(self, item_id, quantity, message_id, sku=""):
         request = _element("ReviseInventoryStatusRequest")

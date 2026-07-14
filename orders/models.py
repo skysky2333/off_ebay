@@ -291,6 +291,65 @@ class Refund(models.Model):
         return f"{self.order.reference}: {self.amount}"
 
 
+class PayPalCase(models.Model):
+    class Kind(models.TextChoices):
+        DISPUTE = "dispute", "Dispute"
+        REVERSAL = "reversal", "Reversal"
+
+    class Status(models.TextChoices):
+        OPEN = "OPEN", "Open"
+        WAITING_FOR_BUYER_RESPONSE = (
+            "WAITING_FOR_BUYER_RESPONSE",
+            "Waiting for buyer response",
+        )
+        WAITING_FOR_SELLER_RESPONSE = (
+            "WAITING_FOR_SELLER_RESPONSE",
+            "Waiting for seller response",
+        )
+        UNDER_REVIEW = "UNDER_REVIEW", "Under review"
+        RESOLVED = "RESOLVED", "Resolved"
+        REVERSED = "REVERSED", "Reversed"
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.PROTECT,
+        related_name="paypal_cases",
+    )
+    kind = models.CharField(max_length=10, choices=Kind)
+    paypal_case_id = models.CharField(max_length=255)
+    status = models.CharField(max_length=32, choices=Status)
+    reason = models.CharField(max_length=64, blank=True)
+    outcome = models.CharField(max_length=64, blank=True)
+    stage = models.CharField(max_length=32, blank=True)
+    channel = models.CharField(max_length=32, blank=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    seller_response_due_at = models.DateTimeField(null=True, blank=True)
+    provider_created_at = models.DateTimeField(null=True, blank=True)
+    provider_updated_at = models.DateTimeField(null=True, blank=True)
+    last_event_type = models.CharField(max_length=80)
+    needs_review = models.BooleanField(default=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-updated_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("kind", "paypal_case_id"),
+                name="unique_paypal_case",
+            ),
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="paypal_case_amount_positive",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.order.reference}: {self.get_kind_display()} {self.paypal_case_id}"
+
+
 class OrderEvent(models.Model):
     class Source(models.TextChoices):
         SYSTEM = "system", "System"

@@ -517,12 +517,14 @@ fieldset legend {
 
 .status-chip--cancelled,
 .status-chip--expired,
+.status-chip--payment-reversed,
 .status-chip--refunded {
   background: #f1eaea;
   color: #7b2b2b;
 }
 
 .status-chip--awaiting_payment,
+.status-chip--paypal-review,
 .status-chip--reserved,
 .status-chip--funding_retry {
   background: #f7eed8;
@@ -719,6 +721,48 @@ fieldset legend {
   text-decoration-thickness: 1px;
 }
 
+.product-card__actions {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.product-card__actions form {
+  min-width: 0;
+  display: flex;
+}
+
+.product-card__action,
+button.product-card__action {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 8px;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.product-card__ebay {
+  min-height: 36px;
+  padding: 0 2px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 620;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.product-card__ebay:hover {
+  color: var(--ink);
+}
+
 .ebay-link {
   min-height: 44px;
   color: var(--muted);
@@ -790,6 +834,58 @@ fieldset legend {
 
 .gallery__stage-link:focus-visible {
   outline-offset: -4px;
+}
+
+.image-viewer {
+  width: min(1440px, calc(100vw - 32px));
+  height: calc(100dvh - 32px);
+  max-width: none;
+  max-height: none;
+  padding: 48px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.image-viewer[open] {
+  display: grid;
+  place-items: center;
+}
+
+.image-viewer::backdrop {
+  background: rgb(23 25 27 / 78%);
+}
+
+.image-viewer__image {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
+}
+
+.image-viewer__close {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.image-viewer__close:hover {
+  background: var(--surface-muted);
 }
 
 .gallery__thumbs {
@@ -1331,6 +1427,28 @@ fieldset legend {
   color: var(--ink);
 }
 
+.order-payment-notice {
+  max-width: 680px;
+  margin-top: 18px;
+  padding: 10px 0 10px 14px;
+  border-left: 3px solid #b27a10;
+  color: var(--ink);
+  display: grid;
+  gap: 2px;
+}
+
+.order-header .order-payment-notice span {
+  color: var(--muted);
+}
+
+.order-payment-notice--danger {
+  border-left-color: var(--danger);
+}
+
+.order-header .order-payment-notice--danger strong {
+  color: var(--danger);
+}
+
 .order-link-tools {
   margin-top: 20px;
   display: flex;
@@ -1635,6 +1753,15 @@ fieldset legend {
   .product-card h2 {
     min-height: 3.9em;
     font-size: 0.87rem;
+  }
+
+  .product-card__actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .product-card__ebay {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .gallery {

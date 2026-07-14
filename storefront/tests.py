@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from catalog.models import Product
-from orders.models import InventoryReservation, Order, Shipment
+from orders.models import InventoryReservation, Order, PayPalCase, Shipment
 from orders.paypal import PayPalInstrumentDeclined
 from orders.services import (
     CheckoutLine,
@@ -289,12 +289,21 @@ class StorefrontTests(TestCase):
         self.assertContains(catalog, "Direct</span> $10.80")
         self.assertContains(catalog, "eBay</span> <s>$12.00</s>")
         self.assertContains(catalog, f'href="{self.product.listing_url}"')
+        self.assertContains(catalog, "View details")
+        self.assertContains(catalog, "Add to cart")
+        self.assertContains(catalog, "View on eBay")
         self.assertContains(detail, "Clean optics")
         self.assertContains(detail, "data-product-price>10.80</span>")
         self.assertContains(detail, "data-ebay-price>12.00</span>")
         self.assertContains(detail, "Prefer eBay? View this item on eBay")
         self.assertContains(detail, "M42")
         self.assertContains(detail, "data-gallery-link")
+        self.assertContains(detail, "data-image-viewer")
+        self.assertContains(detail, "data-image-viewer-image")
+        self.assertContains(
+            detail,
+            'data-image-src="https://i.ebayimg.com/images/g/lens.jpg"',
+        )
         self.assertContains(detail, 'role="group" aria-label="Product images"')
         self.assertContains(detail, "data-image-label=\"Open full-size image 2\"")
         self.assertContains(detail, "Ships within 2 business days.")
@@ -333,6 +342,39 @@ class StorefrontTests(TestCase):
         privacy = self.client.get(reverse("storefront:privacy"))
         self.assertContains(privacy, "Essential cookies")
         self.assertContains(privacy, "does not use analytics or advertising cookies")
+
+    def test_catalog_card_add_action_routes_variations_to_option_selection(self):
+        catalog_url = reverse("storefront:catalog")
+        detail_url = reverse(
+            "storefront:product_detail", kwargs={"slug": self.product.slug}
+        )
+        add_url = reverse(
+            "storefront:cart_add", kwargs={"slug": self.product.slug}
+        )
+
+        direct_catalog = self.client.get(catalog_url)
+
+        self.assertContains(direct_catalog, f'action="{add_url}"')
+        self.assertContains(
+            direct_catalog, '<input type="hidden" name="quantity" value="1">'
+        )
+
+        self.product.variants.create(
+            source_key="FINISH-BLACK",
+            sku="FINISH-BLACK",
+            title="Black finish",
+            specifics={"Finish": ["Black"]},
+            price=Decimal("12.00"),
+            quantity=1,
+        )
+        variation_catalog = self.client.get(catalog_url)
+        detail = self.client.get(detail_url)
+
+        self.assertNotContains(variation_catalog, f'action="{add_url}"')
+        self.assertContains(
+            variation_catalog, f'href="{detail_url}#purchase"'
+        )
+        self.assertContains(detail, 'id="purchase"')
 
     def test_public_read_routes_support_head(self):
         order = self.create_status_order(Order.Status.PAID)
@@ -679,7 +721,7 @@ class StorefrontTests(TestCase):
         )
         blue = self.product.variants.create(
             source_key="blue",
-            sku="BLUE-1",
+            sku="",
             title="Blue finish",
             specifics={"Color": ["Blue"]},
             price=Decimal("16.00"),
@@ -865,6 +907,72 @@ class StorefrontTests(TestCase):
                 "storefront:order_status", kwargs={"token": pending.status_token}
             ),
         )
+
+    def test_private_order_status_surfaces_paypal_cases_without_internal_details(self):
+        disputed = self.create_status_order(Order.Status.PAID)
+        disputed.paid_at = timezone.now()
+        disputed.save(update_fields=("paid_at", "updated_at"))
+        dispute = PayPalCase.objects.create(
+            order=disputed,
+            kind=PayPalCase.Kind.DISPUTE,
+            paypal_case_id="PP-D-CUSTOMER",
+            status=PayPalCase.Status.WAITING_FOR_SELLER_RESPONSE,
+            reason="UNAUTHORIZED_TRANSACTION",
+            stage="INQUIRY",
+            amount=Decimal("10.00"),
+            currency="USD",
+            last_event_type="CUSTOMER.DISPUTE.CREATED",
+        )
+        status_url = reverse(
+            "storefront:order_status", kwargs={"token": disputed.status_token}
+        )
+
+        dispute_response = self.client.get(status_url)
+        confirmation_response = self.client.get(
+            reverse(
+                "storefront:order_confirmation",
+                kwargs={"token": disputed.status_token},
+            )
+        )
+
+        self.assertContains(dispute_response, "PayPal review")
+        self.assertContains(dispute_response, "A PayPal case is under review.")
+        self.assertNotContains(dispute_response, "UNAUTHORIZED_TRANSACTION")
+        self.assertNotContains(dispute_response, "Waiting for seller response")
+        self.assertRedirects(confirmation_response, status_url)
+
+        dispute.status = PayPalCase.Status.RESOLVED
+        dispute.outcome = "RESOLVED_SELLER_FAVOUR"
+        dispute.save(update_fields=("status", "outcome", "updated_at"))
+        resolved_response = self.client.get(status_url)
+
+        self.assertNotContains(resolved_response, "PayPal review")
+        self.assertNotContains(resolved_response, "A PayPal case is under review.")
+
+        reversed_order = self.create_status_order(Order.Status.PAID)
+        reversed_order.paid_at = timezone.now()
+        reversed_order.save(update_fields=("paid_at", "updated_at"))
+        PayPalCase.objects.create(
+            order=reversed_order,
+            kind=PayPalCase.Kind.REVERSAL,
+            paypal_case_id="CAPTURE-CUSTOMER",
+            status=PayPalCase.Status.REVERSED,
+            reason="CHARGEBACK",
+            amount=Decimal("20.00"),
+            currency="USD",
+            last_event_type="PAYMENT.CAPTURE.REVERSED",
+        )
+
+        reversal_response = self.client.get(
+            reverse(
+                "storefront:order_status",
+                kwargs={"token": reversed_order.status_token},
+            )
+        )
+
+        self.assertContains(reversal_response, "Payment reversed")
+        self.assertContains(reversal_response, "PayPal reversed this payment.")
+        self.assertNotContains(reversal_response, "CHARGEBACK")
 
     def test_private_order_pages_hide_cancelled_shipments(self):
         order = self.create_status_order(Order.Status.PAID)

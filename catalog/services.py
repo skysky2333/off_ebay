@@ -330,8 +330,6 @@ def set_inventory_quantity(
         raise ValueError("Expected currency and price must be provided together")
     if variant is not None and variant.product_id != product.id:
         raise ValueError("Variant does not belong to product")
-    if variant is not None and not variant.sku:
-        raise ValueError("Variations without an eBay SKU cannot be purchased")
     operation, created = InventoryOperation.objects.get_or_create(
         idempotency_key=idempotency_key,
         defaults={
@@ -395,14 +393,18 @@ def set_inventory_quantity(
             )
         else:
             listing_variant = None
-            matches = [item for item in listing.variations if item.sku == variant.sku]
+            matches = [
+                item
+                for item in listing.variations
+                if item.source_key == variant.source_key
+            ]
             if reason == InventoryOperation.Reason.RELEASE and not matches:
                 complete_unavailable_release(operation, created, product, listing)
                 return None
             if len(matches) != 1:
                 if not created or expected_price is None:
                     raise EbayResponseError(
-                        f"GetItem did not return variation SKU {variant.sku}"
+                        f"GetItem did not return option {variant.title}"
                     )
                 current_quantity = None
                 current_price = None
@@ -439,12 +441,23 @@ def set_inventory_quantity(
                 )
             )
         elif current_quantity == expected_quantity:
-            verified = client.revise_inventory_status(
-                product.ebay_item_id,
-                quantity,
-                idempotency_key,
-                variant.sku if variant else "",
-            )
+            if variant is not None and not variant.sku:
+                verified = client.revise_variation_inventory(
+                    product.ebay_item_id,
+                    quantity,
+                    idempotency_key,
+                    variant.source_key,
+                    variant.specifics,
+                    listing_variant.price,
+                    listing.currency,
+                )
+            else:
+                verified = client.revise_inventory_status(
+                    product.ebay_item_id,
+                    quantity,
+                    idempotency_key,
+                    variant.sku if variant else "",
+                )
         else:
             conflict = (
                 f"{product.title} is no longer available."

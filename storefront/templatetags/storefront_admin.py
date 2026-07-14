@@ -7,8 +7,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from catalog.models import InventoryOperation, SyncRun
-from orders.models import Order, Refund
-from orders.services import orders_needing_fulfillment, refunds_needing_review
+from orders.models import Order, PayPalCase, Refund
+from orders.services import (
+    orders_needing_fulfillment,
+    paypal_cases_needing_review,
+    refunds_needing_review,
+)
 
 from ..configuration import checkout_enabled
 from ..models import StoreSettings
@@ -31,6 +35,7 @@ def operations_dashboard(context):
     can_view_inventory = _can_view(user, InventoryOperation)
     can_view_sync = _can_view(user, SyncRun)
     can_view_refunds = _can_view(user, Refund)
+    can_view_paypal_cases = _can_view(user, PayPalCase)
     store = StoreSettings.objects.filter(pk=1).first()
     can_view_store = (
         _can_view(user, StoreSettings)
@@ -81,6 +86,20 @@ def operations_dashboard(context):
         if can_view_refunds
         else {"review": None, "failed": None}
     )
+    paypal_case_counts = (
+        paypal_cases_needing_review().aggregate(
+            review=Count("pk"),
+            urgent=Count(
+                "pk",
+                filter=Q(
+                    Q(kind=PayPalCase.Kind.REVERSAL)
+                    | Q(status=PayPalCase.Status.WAITING_FOR_SELLER_RESPONSE)
+                ),
+            ),
+        )
+        if can_view_paypal_cases
+        else {"review": None, "urgent": None}
+    )
     sync_in_progress = bool(
         last_sync
         and last_sync.status == SyncRun.Status.RUNNING
@@ -97,6 +116,7 @@ def operations_dashboard(context):
         "can_sync": can_request_sync and not sync_in_progress,
         "sync_in_progress": sync_in_progress,
         "ebay_configured": ebay_configured,
+        "can_view_paypal_cases": can_view_paypal_cases,
         "checkout_is_enabled": checkout_enabled(store),
         "fulfillment_count": (
             orders_needing_fulfillment().count()
@@ -123,6 +143,8 @@ def operations_dashboard(context):
         ),
         "refund_review_count": refund_counts["review"],
         "failed_refund_count": refund_counts["failed"],
+        "paypal_case_review_count": paypal_case_counts["review"],
+        "urgent_paypal_case_count": paypal_case_counts["urgent"],
         "store_settings_url": reverse(
             (
                 "admin:storefront_storesettings_change"

@@ -88,9 +88,8 @@ class ProductQuerySet(models.QuerySet):
         return self.with_availability().alias(
             has_active_variants=Exists(active_variants),
             has_available_variant=Exists(
-                active_variants.exclude(sku="").filter(
-                    purchasable=True,
-                    quantity__gt=F("_held_quantity"),
+                active_variants.filter(
+                    purchasable=True, quantity__gt=F("_held_quantity")
                 )
             ),
         ).filter(active=True, checkout_excluded=False, currency="USD").filter(
@@ -141,7 +140,7 @@ class Product(models.Model):
                 return sum(
                     variant.available_quantity
                     for variant in active_variants
-                    if variant.purchasable and variant.sku
+                    if variant.purchasable
                 )
             held_quantities = {
                 row["variant_id"]: row["total"]
@@ -155,7 +154,7 @@ class Product(models.Model):
             return sum(
                 max(variant.quantity - held_quantities.get(variant.pk, 0), 0)
                 for variant in active_variants
-                if variant.purchasable and variant.sku
+                if variant.purchasable
             )
         held_quantity = getattr(self, "_held_quantity", None)
         if held_quantity is None:
@@ -177,7 +176,6 @@ class Product(models.Model):
             variant.price
             for variant in active_variants
             if variant.purchasable
-            and variant.sku
             and variant.available_quantity > 0
         ]
         return min(prices) if prices else self.price
@@ -189,6 +187,10 @@ class Product(models.Model):
     @property
     def display_direct_price(self):
         return calculate_direct_price(self.display_price)
+
+    @property
+    def has_active_variants(self):
+        return any(variant.active for variant in self.variants.all())
 
     @property
     def is_purchasable(self):
