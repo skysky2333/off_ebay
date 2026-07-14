@@ -1088,7 +1088,10 @@ def reconcile_pending_refund(refund_id, client: PayPalClient):
     if _refund_capture_id(response) != refund.order.paypal_capture_id:
         raise PaymentDataError("PayPal refund capture does not match the order.")
     if status == Refund.Status.PENDING:
-        return refund
+        Refund.objects.filter(pk=refund_id, status=Refund.Status.PENDING).update(
+            updated_at=timezone.now()
+        )
+        return Refund.objects.get(pk=refund_id)
     with transaction.atomic():
         order = Order.objects.select_for_update().get(pk=refund.order_id)
         refund = Refund.objects.select_for_update().get(pk=refund_id)

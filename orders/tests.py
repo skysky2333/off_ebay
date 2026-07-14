@@ -1871,6 +1871,22 @@ class OrderServiceTests(TestCase):
             [Refund.Status.FAILED, Refund.Status.COMPLETED],
         )
 
+    def test_pending_refund_poll_refreshes_its_health_timestamp(self):
+        order = self.create_order()
+        paypal = PayPalSpy()
+        create_paypal_checkout(order.pk, "https://a", "https://b", paypal)
+        capture_paypal_order(order.pk, paypal, self.inventory)
+        paypal.refund_status = "PENDING"
+        refund_order(order.pk, paypal)
+        refund = order.refunds.get()
+        stale_at = timezone.now() - timedelta(hours=1)
+        Refund.objects.filter(pk=refund.pk).update(updated_at=stale_at)
+
+        result = reconcile_pending_refund(refund.pk, paypal)
+
+        self.assertEqual(result.status, Refund.Status.PENDING)
+        self.assertGreater(result.updated_at, stale_at)
+
     def test_paypal_tracking_poll_imports_and_updates_idempotently(self):
         order = self.create_order()
         paypal = PayPalSpy()
